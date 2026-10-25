@@ -11,7 +11,7 @@
   <link rel="icon" href="icons/favicon.ico" sizes="any">
   <link rel="icon" href="icons/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <script>window.MF_API_URL = "https://script.google.com/macros/s/AKfycbwdLMirInPu-iEuonQ9OSqvqfujJ3jgjUz23TS5sbzLF5M5ExgEpRvA_Gj8fPfVbHa9/exec"; window.MF_BUILD = "202610252258-c6f31d5b";</script>
+  <script>window.MF_API_URL = "https://script.google.com/macros/s/AKfycbwdLMirInPu-iEuonQ9OSqvqfujJ3jgjUz23TS5sbzLF5M5ExgEpRvA_Gj8fPfVbHa9/exec"; window.MF_BUILD = "202610252347-1260615a"; window.MF_OFFLINE = true;</script>
   <style>
   #mf-pwa-update { position: fixed; left: 50%; top: calc(env(safe-area-inset-top, 0px) + 10px); transform: translateX(-50%); z-index: 200;
     display: flex; align-items: center; gap: 12px; max-width: calc(100vw - 24px); padding: 8px 8px 8px 16px; border-radius: 999px;
@@ -2439,6 +2439,23 @@ html[data-layout="tablet"] .wa-news-pub__row .btn, html[data-layout="desktop"] .
 .wa-fixnote__box.is-ok > b { color: var(--fresh); }
 .wa-fixnote .modal__actions .btn { flex: 1; }
 
+/* Без интернета (PWA, 2026-10-26): полоса-журнал «не отправлено / не принято» и окно очереди (ui_app.html) */
+.wa-journal-bar { position: sticky; top: 0; z-index: 12; width: 100%; border: 0; font: inherit; font-size: 13px; font-weight: 700; text-align: center; cursor: pointer; }
+.app-header { top: var(--journal-h, 0px); }
+.wa-journal-bar.is-offline { background: var(--partial); color: var(--brand-green-dark); }
+.wa-journal-bar.is-sync { background: var(--brand-green); color: var(--brand-cream); }
+.wa-journal-bar.is-fail { background: var(--danger); color: #fff; }
+.wa-journal-bar__go { flex: none; opacity: .8; }
+.wa-journal { max-width: 520px; max-height: calc(100dvh - 32px); }
+.wa-journal__list { display: flex; flex-direction: column; min-height: 0; margin: 0 -6px; padding: 0 6px; overflow-y: auto; }
+.wa-journal__row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--border); }
+.wa-journal__time { flex: none; min-width: 44px; color: var(--text-muted); font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.wa-journal__main { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; font-size: 14px; }
+.wa-journal__main small { color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+.wa-journal__row.is-send small { color: var(--brand-green); }
+.wa-journal__row.is-fail small { color: var(--danger); }
+.wa-journal__x { flex: none; min-height: 36px; padding: 0 12px; font-size: 13px; }
+
 </style>
 
 </head>
@@ -2629,6 +2646,33 @@ window.MFC = window.Vue ? (function () {
     set(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} },
   };
 
+  // Работа без интернета (PWA, 2026-10-26; сборка tools/build_pwa.js задаёт MF_OFFLINE): данные экранов — копией на
+  // устройстве, действия точки — очередью (outbox ниже). В приложении Apps Script выключено — там всё как раньше.
+  const OFFLINE = !!window.MF_OFFLINE;
+
+  // Хранилище на устройстве для копий данных (IndexedDB: большие объёмы, localStorage — маленький и занят фото).
+  // Нет его (приватный режим) — копий просто нет
+  const IDB = (() => {
+    let dbp = null;
+    const open = () => dbp || (dbp = new Promise((res, rej) => {
+      const r = indexedDB.open('mf-bar', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('kv');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    }));
+    const run = (mode, fn) => open().then(db => new Promise((res, rej) => {
+      const t = db.transaction('kv', mode);
+      const q = fn(t.objectStore('kv'));
+      t.oncomplete = () => res(q.result);
+      t.onerror = () => rej(t.error);
+    }));
+    return {
+      get: k => run('readonly', s => s.get(k)).catch(() => undefined),
+      set: (k, v) => run('readwrite', s => s.put(v, k)).catch(() => {}),
+      clear: () => run('readwrite', s => s.clear()).catch(() => {}),
+    };
+  })();
+
   // Форматтеры из design/demo.js: запятая, точность до 0,001
   const MF = {
     fmt: n => n == null || n === '' ? '' : String(Math.round(n * 1000) / 1000).replace('.', ','),
@@ -2737,27 +2781,34 @@ window.MFC = window.Vue ? (function () {
     }
   }
 
-  // PWA (интерфейс на своём адресе, tools/build_pwa.js задаёт MF_API_URL): тот же запрос — POST на /exec (doPost)
-  async function fetchApi(method, params) {
+  // PWA (интерфейс на своём адресе, tools/build_pwa.js задаёт MF_API_URL): тот же запрос — POST на /exec (doPost).
+  // opId — номер действия из очереди: сервер не выполнит его дважды. Связь «висит» дольше 30 с — как нет связи
+  async function fetchApi(method, params, opId) {
     let res = null;
+    const ctl = window.AbortController ? new AbortController() : null;
+    const timer = ctl ? setTimeout(() => ctl.abort(), 30000) : null;
     try {
       const r = await fetch(window.MF_API_URL, {
-        method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({ token: LS.get('mf-session'), method, params: params || {} }),
+        method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, signal: ctl ? ctl.signal : undefined,
+        body: JSON.stringify(Object.assign({ token: LS.get('mf-session'), method, params: params || {} }, opId ? { opId } : {})),
       });
       if (!r.ok) throw new Error('HTTP ' + r.status);
       res = await r.json();
     } catch (e) {
+      if (OFFLINE) store.offline = true;
       throw new ApiError({ code: 'NETWORK', message: 'Нет связи с сервером. Проверьте интернет и попробуйте ещё раз.' });
+    } finally {
+      clearTimeout(timer);
     }
+    if (OFFLINE) store.offline = false;
     if (res && res.ok) return res.data;
     throw new ApiError(res && res.error ? res.error : {
       code: 'EMPTY', message: 'Сервер прислал пустой ответ (' + method + '). Попробуйте ещё раз; если повторится — пришлите скриншот.',
     });
   }
 
-  function rawApi(method, params) {
-    if (window.MF_API_URL) return fetchApi(method, params);
+  function rawApi(method, params, opId) {
+    if (window.MF_API_URL) return fetchApi(method, params, opId);
     return new Promise((resolve, reject) => {
       if (!window.google || !google.script) {
         reject(new ApiError({ code: 'NETWORK', message: 'Приложение открыто не из Apps Script' }));
@@ -2767,21 +2818,169 @@ window.MFC = window.Vue ? (function () {
         .withSuccessHandler(res => res && res.ok ? resolve(res.data) : reject(new ApiError(res ? res.error : {
           code: 'EMPTY', message: 'Сервер прислал пустой ответ (' + method + '). Попробуйте ещё раз; если повторится — пришлите скриншот.',
         })))
-        .withFailureHandler(() => reject(new ApiError({ code: 'NETWORK', message: 'Нет связи с сервером. Проверьте интернет и попробуйте ещё раз.' })))
-        .api({ token: LS.get('mf-session'), method, params: params || {} });
-    });
+        .withFailureHandler(() => {
+          if (OFFLINE) store.offline = true;
+          reject(new ApiError({ code: 'NETWORK', message: 'Нет связи с сервером. Проверьте интернет и попробуйте ещё раз.' }));
+        })
+        .api(Object.assign({ token: LS.get('mf-session'), method, params: params || {} }, opId ? { opId } : {}));
+    }).then(d => { if (OFFLINE) store.offline = false; return d; });
   }
 
-  // Для экранов: истёкшую сессию молча восстанавливаем по токену устройства
-  async function callApi(method, params) {
+  // Для экранов: истёкшую сессию молча восстанавливаем по токену устройства.
+  // Без интернета (OFFLINE) чтение отдаёт последнюю копию с устройства — экран открывается, как был
+  async function callApi(method, params, opId) {
+    const key = OFFLINE && READ_CACHE.has(method) ? cacheKey(method, params) : '';
     try {
-      return await rawApi(method, params);
+      const data = await callNet(method, params, opId);
+      // Стартовые данные — под логином из ответа (вошёл другой пользователь — его ключ, не прошлого)
+      if (key) IDB.set(method === 'app.bootstrap' && data && data.user ? cacheKey(method, params, data.user.login) : key, { at: Date.now(), data });
+      return data;
+    } catch (e) {
+      if (key && e.code === 'NETWORK') {
+        const hit = await IDB.get(key);
+        if (hit) return hit.data;
+      }
+      throw e;
+    }
+  }
+
+  async function callNet(method, params, opId) {
+    try {
+      return await rawApi(method, params, opId);
     } catch (e) {
       if (e.code !== 'AUTH') throw e;
-      if (await resumeByDevice()) return rawApi(method, params);
+      if (await resumeByDevice()) return rawApi(method, params, opId);
       toLogin('Сессия истекла — войдите снова');
       throw e;
     }
+  }
+
+  // Чтения, копия которых хранится на устройстве (без интернета экран показывает последнее загруженное)
+  const READ_CACHE = new Set(['app.bootstrap', 'work.load', 'dir.list', 'dir.techCard', 'training.data', 'news.photo',
+    'admin.dashboard', 'admin.analytics', 'admin.archive.summary', 'admin.archive.query', 'admin.prep.pending', 'admin.iiko.status',
+    'admin.autoplan.preview', 'admin.autoplan.status', 'salad.ui', 'salad.day', 'salad.sales', 'salad.archive',
+    'owner.settings', 'owner.users', 'owner.salad.settings', 'owner.pack.ui', 'owner.news.list', 'journal.query']);
+  // Копии — под логином: на одном планшете не покажутся данные прошлого пользователя. Пока стартовых данных нет —
+  // логин ключа входа (mf-session-login), иначе того, чьи копии на устройстве (mf-cache-login; mf-last-login — другое:
+  // подсказка логина на экране входа)
+  const cacheKey = (method, params, login) => 'api:' + (login || (store.user ? store.user.login : LS.get('mf-session-login') || LS.get('mf-cache-login')) || '') +
+    ':' + method + ':' + JSON.stringify(params || {});
+  // Экран точки меняет загруженные данные ответами очереди — копия на устройстве тоже должна быть свежей
+  const cachePut = (method, params, data) => { if (OFFLINE) IDB.set(cacheKey(method, params), { at: Date.now(), data }); };
+
+  // ------------------------------------------------------------------ очередь действий (OFFLINE, 2026-10-26)
+  // Действия точки (отметки, «Вне плана», возврат в работу, смена, «Набор собран») — сразу на экране и в очередь на
+  // устройстве (localStorage: переживает закрытие приложения), на сервер — по одному и по порядку, когда есть связь.
+  // У действия свой номер (opId): потерялся ответ — сервер не выполнит его второй раз (api()). Сервер отказал
+  // (позицию уже отметили с другого устройства, день закрыт…) — действие остаётся в журнале «Не принято» с причиной.
+  // op: { id, login, method, params, at, label, tt, state: wait | send | fail, error, tries }
+  const OUTBOX_KEY = 'mf-outbox';
+  const RETRY_CODES = ['NETWORK', 'BUSY', 'AUTH', 'EMPTY', 'INTERNAL'];
+  const outbox = reactive({ ops: readOps(), busy: false, open: false, tries: 0 });
+  const opHandlers = {};   // method → (op, data) => { map, updated, failed } — экран точки: ответ сервера на экран; fail — отказ
+  let opsTimer = null;
+
+  function readOps() {
+    try {
+      const a = JSON.parse(LS.get(OUTBOX_KEY) || '[]');
+      // «Отправлялось», когда приложение закрыли, — отправить снова (повтор сервер не выполнит дважды)
+      return Array.isArray(a) ? a.filter(o => o && o.id && o.method && o.login).map(o => Object.assign(o, { state: o.state === 'send' ? 'wait' : o.state })) : [];
+    } catch (e) { return []; }
+  }
+  function saveOps() { LS.set(OUTBOX_KEY, outbox.ops.length ? JSON.stringify(outbox.ops) : null); }
+  const myOps = () => outbox.ops.filter(o => store.user && o.login === store.user.login);
+
+  function queueOp(method, params, info) {
+    const op = Object.assign({
+      id: 'op' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8), login: store.user.login,
+      method, params, at: Date.now(), label: method, tt: '', state: 'wait', error: '', tries: 0,
+    }, info);
+    outbox.ops.push(op);
+    saveOps();
+    kickOps(0);
+    return op;
+  }
+
+  // Убрать действие из очереди: ещё не отправленное (сняли галочку без интернета) или не принятое. true — убрано
+  function cancelOp(id) {
+    const i = outbox.ops.findIndex(o => o.id === id && o.state !== 'send');
+    if (i < 0) return false;
+    outbox.ops.splice(i, 1);
+    saveOps();
+    return true;
+  }
+
+  function kickOps(ms) {
+    if (!OFFLINE) return;
+    clearTimeout(opsTimer);
+    opsTimer = setTimeout(sendOps, ms == null ? 300 : ms);
+  }
+
+  async function sendOps() {
+    if (outbox.busy || !store.user || store.phase !== 'app') return;
+    outbox.busy = true;
+    try {
+      for (;;) {
+        const op = myOps().find(o => o.state === 'wait');
+        if (!op) { outbox.tries = 0; break; }
+        op.state = 'send';
+        saveOps();
+        let data = null, err = null;
+        // Копия параметров: в очереди они — живой объект Vue, а отправке нужен обычный
+        try { data = await callNet(op.method, JSON.parse(JSON.stringify(op.params)), op.id); } catch (e) { err = e; }
+        // Нет связи, сервер занят, нужен вход — действие ждёт; ошибка сервера — до трёх повторов
+        if (err && RETRY_CODES.includes(err.code) && !(err.code === 'INTERNAL' && op.tries >= 2)) {
+          Object.assign(op, { state: 'wait', error: err.code === 'NETWORK' ? '' : err.message, tries: op.tries + (err.code === 'INTERNAL' ? 1 : 0) });
+          saveOps();
+          outbox.tries++;
+          if (err.code !== 'AUTH') kickOps(Math.min(60000, 2000 * Math.pow(2, Math.min(outbox.tries - 1, 5))));
+          break;
+        }
+        let fx = {};
+        if (!err && opHandlers[op.method]) {
+          try { fx = opHandlers[op.method](op, data) || {}; } catch (e) { console.error('Очередь: ответ', op.method, e); }
+        }
+        // Часть пачки принята — её ответ всё равно правит следующие действия
+        if (fx.map || fx.updated) rewriteOps(fx.map || {}, fx.updated || {});
+        const failed = err ? err.message : fx.failed;
+        if (failed) {
+          Object.assign(op, { state: 'fail', error: failed });
+          saveOps();
+          if (opHandlers.fail) { try { opHandlers.fail(op, err); } catch (e) { console.error('Очередь: отказ', e); } }
+          continue;
+        }
+        outbox.ops.splice(outbox.ops.indexOf(op), 1);
+        saveOps();
+        outbox.tries = 0;
+      }
+    } finally {
+      outbox.busy = false;
+    }
+  }
+
+  // Ответ сервера правит следующие действия очереди: временный uid (остаток «Частично», «Вне плана») — на настоящий,
+  // expectedUpdatedAt — на время изменения позиции этим ответом (иначе сервер счёл бы их конфликтом)
+  function rewriteOps(map, updated) {
+    const fix = u => map[u] || u;
+    const one = it => {
+      if (!it || !it.uid) return;
+      it.uid = fix(it.uid);
+      if ('expectedUpdatedAt' in it && it.uid in updated) it.expectedUpdatedAt = updated[it.uid];
+    };
+    for (const o of outbox.ops) {
+      if (o.state === 'send') continue;
+      const p = o.params || {};
+      if (Array.isArray(p.items)) p.items.forEach(one); else one(p);
+      if (Array.isArray(p.uids)) p.uids = p.uids.map(fix);
+    }
+  }
+
+  // Отправить, как только появилась связь, вернулись в приложение, вошли; ждущее — проверять раз в полминуты
+  if (OFFLINE) {
+    window.addEventListener('online', () => kickOps(0));
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') kickOps(0); });
+    watch(() => store.phase === 'app' && store.user && store.user.login, on => { if (on) kickOps(500); });
+    setInterval(() => { if (myOps().some(o => o.state === 'wait') && !outbox.busy) kickOps(0); }, 30000);
   }
 
   async function resumeByDevice() {
@@ -2790,6 +2989,7 @@ window.MFC = window.Vue ? (function () {
     try {
       const r = await rawApi('auth.resume', { deviceToken });
       LS.set('mf-session', r.token);
+      if (r.user) LS.set('mf-session-login', r.user.login);
       return true;
     } catch (e) {
       if (e.code === 'AUTH') LS.set('mf-device', null);
@@ -2865,7 +3065,17 @@ window.MFC = window.Vue ? (function () {
 
   // Повторная загрузка (кнопка «Обновить») оставляет пользователя на том же экране
   async function loadApp() {
-    const d = await callApi('app.bootstrap');
+    applyBoot(await callApi('app.bootstrap'));
+  }
+
+  function applyBoot(d) {
+    if (OFFLINE) {
+      const was = LS.get('mf-cache-login');
+      if (was !== d.user.login) {
+        LS.set('mf-cache-login', d.user.login);
+        if (was) IDB.clear().then(() => IDB.set(cacheKey('app.bootstrap', {}, d.user.login), { at: Date.now(), data: d }));
+      }
+    }
     const same = store.user && store.user.login === d.user.login;
     const pointTt = same && d.user.role !== 'point' && d.points.some(p => p.tt === store.pointTt) ? store.pointTt : '';
     store.salad = d.salad || null;   // до меню: от него зависит, есть ли «Заготовки Салат БАЗА»
@@ -2921,6 +3131,17 @@ window.MFC = window.Vue ? (function () {
 
   async function boot() {
     store.fatal = '';
+    // Без интернета (OFFLINE): вход на устройстве есть и есть копия стартовых данных — приложение открывается сразу
+    // из неё (и без сети), свежие данные и проверка входа — в фоне
+    if (OFFLINE && (LS.get('mf-session') || LS.get('mf-device'))) {
+      const hit = await IDB.get(cacheKey('app.bootstrap'));
+      const owner = LS.get('mf-session-login');
+      if (hit && hit.data && hit.data.user && (!owner || owner === hit.data.user.login)) {
+        applyBoot(hit.data);
+        refreshBoot();
+        return;
+      }
+    }
     try {
       if (LS.get('mf-session') || await resumeByDevice()) {
         await loadApp();
@@ -2931,6 +3152,32 @@ window.MFC = window.Vue ? (function () {
       if (e.code === 'AUTH') return;  // callApi уже открыл экран входа
       store.fatal = e.message;
     }
+  }
+
+  // Открыли из копии — свежие стартовые данные с сервера. Нет связи — ещё раз, как появится (или через 20 с).
+  // Вход отозван (токена устройства больше нет) — экран входа; очередь действий остаётся и уйдёт после входа
+  let bootWait = null;
+  async function refreshBoot() {
+    try {
+      if (!LS.get('mf-session') && !(await resumeByDevice())) {
+        if (!LS.get('mf-device')) { toLogin('Войдите снова'); return; }
+        throw new ApiError({ code: 'NETWORK' });
+      }
+      const d = await callNet('app.bootstrap');
+      IDB.set(cacheKey('app.bootstrap', {}, d.user.login), { at: Date.now(), data: d });
+      applyBoot(d);
+    } catch (e) {
+      if (e.code === 'NETWORK' && !bootWait) {
+        const go = () => { clearTimeout(bootWait); bootWait = null; window.removeEventListener('online', go); refreshBoot(); };
+        bootWait = setTimeout(go, 20000);
+        window.addEventListener('online', go);
+      }
+    }
+  }
+
+  // Выход: копии данных на устройстве стираются (планшет могут отдать другой точке); очередь остаётся за своим логином
+  function forgetDevice() {
+    if (OFFLINE) IDB.clear();
   }
 
   // Настройки этого устройства: тема и вид экрана (Авто / Телефон / Планшет / ПК)
@@ -3008,6 +3255,7 @@ window.MFC = window.Vue ? (function () {
     LS, MF, plural, initials, asset, thumbImg, ROLE_LABELS, MODE_LABELS,
     store, toggleTheme, setTheme, setLayout, LAYOUTS, autoStatus, DeviceSettings,
     ApiError, rawApi, callApi, resumeByDevice,
+    OFFLINE, IDB, cachePut, outbox, myOps, queueOp, cancelOp, kickOps, opHandlers, forgetDevice,
     SCREENS, POINT_SCREENS, HELP_SCREENS, screen, navFor, allScreens,
     loadApp, toLogin, boot, confetti, enterPoint, leavePoint, addDays, atText, photoOf, setPhoto,
   };
@@ -3627,13 +3875,14 @@ window.MFC = window.Vue ? (function () {
   if (!C) return;
 
   const { reactive, ref, computed, watch, nextTick, onMounted, onBeforeUnmount } = Vue;
-  const { store, LS, MF, plural, initials, asset, thumbImg, callApi, autoStatus, confetti, photoOf } = C;
+  const { store, LS, MF, plural, initials, asset, thumbImg, callApi, autoStatus, confetti, photoOf, OFFLINE } = C;
   const fmt = MF.fmt;
 
   // ================================================================== данные точки
 
   const work = reactive({
     tt: '', data: null, error: '', at: 0,
+    base: null,    // без интернета (OFFLINE): ответ сервера; data = base + очередь действий поверх (recompute)
     busy: 0,       // идут запросы — опрос сервера не перетирает данные
     pending: 0,    // сохранения в фоне
     sync: 'idle',  // полоска вверху экрана: idle | saving | done | error
@@ -3662,7 +3911,7 @@ window.MFC = window.Vue ? (function () {
       const data = await callApi('work.load', { tt });
       // Пока шёл запрос, на экране что-то отметили — ответ уже устарел
       if (work.tt !== tt || work.seq !== seq || work.pending) return;
-      work.data = data;
+      if (OFFLINE) { work.base = data; recompute(); } else work.data = data;
       work.error = '';
       work.at = Date.now();
     } catch (e) {
@@ -3683,7 +3932,7 @@ window.MFC = window.Vue ? (function () {
 
   function stop() {
     clearInterval(pollTimer);
-    Object.assign(work, { tt: '', data: null, error: '', at: 0 });
+    Object.assign(work, { tt: '', data: null, base: null, error: '', at: 0 });
   }
 
   // Вернулись на вкладку — обновить, если данные старше 15 секунд
@@ -3727,6 +3976,7 @@ window.MFC = window.Vue ? (function () {
   // Мгновенное сохранение: результат сразу на экране, сервер пишет в фоне (полоска вверху).
   // entries: [{ item, fact, comment }]. Ошибка — позиция возвращается, введённое остаётся черновиком.
   function commitSave(entries, toastText) {
+    if (OFFLINE) return commitSaveQ(entries, toastText);
     const kind = entries[0].item.kind;
     const employee = shiftEmployee(kind);
     const stamp = nowStamp();
@@ -3817,7 +4067,8 @@ window.MFC = window.Vue ? (function () {
     syncTimer = setTimeout(() => { work.sync = 'idle'; }, work.sync === 'error' ? 3000 : 1200);
   }
 
-  function addItem(kind, name, fact, comment) {
+  function addItem(kind, name, fact, comment, target) {
+    if (OFFLINE) return addItemQ(kind, name, fact, comment, target);
     return busy(async () => {
       const r = await callApi('work.add', { kind, tt: work.tt, name, fact, comment, date: kind === 'preps' ? prepDay.value : undefined });
       upsert(r.item);
@@ -3832,6 +4083,14 @@ window.MFC = window.Vue ? (function () {
     if (!u) return;
     toast.visible = false;
     toast.undo = null;
+    // Без интернета: ещё не ушло на сервер — снять из очереди; ушло — вернуть позиции в работу (тоже очередью)
+    if (OFFLINE && u.opId) {
+      if (!C.cancelOp(u.opId)) {
+        for (const id of u.uids) { const cur = listOf(u.kind).find(x => x.uid === id); if (cur && cur.status !== 'todo') unmarkItemQ(cur, true); }
+      }
+      showToast('Отменено');
+      return;
+    }
     try {
       // Сначала дождаться фонового сохранения — отменять нечего, пока оно не дошло до сервера
       await Promise.all(u.uids.map(id => inflight[id]).filter(Boolean));
@@ -3854,6 +4113,7 @@ window.MFC = window.Vue ? (function () {
   // Сразу на экране, сервер — в фоне: нетронутый остаток пропадает, у заготовки смузи снимается «Набор собран».
   // Ошибка — отметка возвращается на место, причина — в уведомлении.
   async function unmarkItem(item) {
+    if (OFFLINE) return unmarkItemQ(item);
     const kind = item.kind;
     const uid = item.uid;
     const tt = work.tt;
@@ -3907,6 +4167,7 @@ window.MFC = window.Vue ? (function () {
 
   // Смена — тоже сразу на экране; сервер подтверждает в фоне
   async function setShift(role, name) {
+    if (OFFLINE) return setShiftQ(role, name);
     const before = Object.assign({}, work.data.shift);
     const next = Object.assign({}, before, { [role]: name });
     if (role === 'bar' && name && !before.prep) next.prep = name;
@@ -3918,6 +4179,205 @@ window.MFC = window.Vue ? (function () {
       work.data.shift = before;
       throw e;
     }
+  }
+
+  // ================================================================== без интернета (OFFLINE, 2026-10-26)
+  // Данные точки = ответ сервера (work.base) + поверх ещё не принятые действия очереди (applyOp): экран показывает
+  // своё и без интернета, и после перезапуска приложения. Ответ сервера на действие правит work.base (opHandlers) и
+  // копию на устройстве; сервер отказал — действие уходит из «поверх», позиция — как на сервере, введённое — в черновик.
+
+  // Экран заново: ответ сервера + действия очереди этой точки (кроме не принятых)
+  function recompute() {
+    const b = work.base;
+    if (!b) return;
+    const d = Object.assign({}, b, {
+      dishes: b.dishes.map(x => Object.assign({}, x)),
+      preps: b.preps.map(x => Object.assign({}, x)),
+      smoothies: (b.smoothies || []).map(x => Object.assign({}, x)),
+      shift: Object.assign({}, b.shift),
+    });
+    for (const op of C.myOps()) if (op.tt === work.tt && op.state !== 'fail') applyOp(d, op);
+    work.data = d;
+  }
+
+  const round3 = n => Math.round(n * 1000) / 1000;
+  const setOf = (d, it) => it.dishFor ? (d.smoothies || []).find(x => x.dish === it.dishFor && (!x.date || x.date === it.date)) : null;
+  const smoothieOf = (d, p) => (d.smoothies || []).find(x => x.dish === p.dish && (!x.date || x.date === p.date));
+
+  // Действие очереди — на данных экрана, так же, как его выполнит сервер (waSaveItems_, waApiWorkReset_, waApiWorkAdd_…).
+  // Позиция на сервере уже не «К выполнению» (ушло, отметили с другого устройства) — показываем, как на сервере
+  function applyOp(d, op) {
+    const p = op.params || {};
+    const m = op.meta || {};
+    const list = p.kind === 'preps' ? d.preps : d.dishes;
+    const find = uid => list.find(x => x.uid === uid);
+    if (op.method === 'work.saveMany') {
+      for (const it of p.items || []) {
+        const cur = find(it.uid);
+        if (!cur || cur.status !== 'todo') continue;
+        const tone = autoStatus(cur.amount, it.fact, cur.unit).tone;
+        const status = tone === 'partial' ? 'partial' : 'done';
+        Object.assign(cur, { fact: it.fact, comment: it.comment || '', status, employee: m.employee || '', statusAt: m.stamp || '', over: tone === 'over', pending: true });
+        if (status === 'partial' && !list.some(x => x.parentUid === cur.uid)) {
+          list.push(Object.assign({}, cur, {
+            uid: 'tmp-' + cur.uid, parentUid: cur.uid, amount: round3(cur.amount - it.fact),
+            fact: null, comment: '', status: 'todo', employee: '', statusAt: '', updatedAt: '', over: false,
+          }));
+        }
+      }
+    } else if (op.method === 'work.reset') {
+      const cur = find(p.uid);
+      if (!cur || cur.status === 'todo') return;
+      const unplanned = !cur.parentUid && /^Вне плана/.test(cur.comment || '');
+      for (const r of list.filter(x => x.parentUid === cur.uid && x.status === 'todo')) list.splice(list.indexOf(r), 1);
+      if (unplanned) list.splice(list.indexOf(cur), 1);
+      else Object.assign(cur, { status: 'todo', fact: null, comment: '', employee: '', statusAt: '', over: false, pending: true });
+      const set = setOf(d, cur);
+      if (set) set.collected = false;
+    } else if (op.method === 'work.add') {
+      const tmp = 'tmp-' + op.id;
+      if (m.item && !find(tmp)) list.push(Object.assign({}, m.item, { uid: tmp, pending: true }));
+    } else if (op.method === 'work.smoothieDone') {
+      const set = smoothieOf(d, p);
+      if (set) set.collected = true;
+    } else if (op.method === 'work.shift') {
+      Object.assign(d.shift, m.shift || {});
+    }
+  }
+
+  // Действия: сразу на экране (очередь меняется — recompute), на сервер — по очереди
+  function commitSaveQ(entries, toastText) {
+    const kind = entries[0].item.kind;
+    const first = entries[0];
+    const word = autoStatus(first.item.amount, first.fact, first.item.unit).tone === 'partial' ? 'Частично' : 'Готово';
+    const label = entries.length === 1
+      ? word + ' · ' + first.item.name + ' — ' + fmt(first.fact) + ' ' + first.item.unit
+      : (toastText || 'Отмечено') + ' · ' + entries.length + ' ' + plural(entries.length, ['позиция', 'позиции', 'позиций']);
+    const op = C.queueOp('work.saveMany', {
+      kind, at: Date.now(),
+      items: entries.map(({ item, fact, comment }) => ({ uid: item.uid, fact, comment, expectedUpdatedAt: item.updatedAt })),
+    }, { tt: work.tt, label, meta: { employee: shiftEmployee(kind), stamp: nowStamp() } });
+    entries.forEach(({ item }) => setDraft(item.uid, null));
+    showToast(toastText || 'Сохранено · ' + first.item.name, { kind, uids: entries.map(e => e.item.uid), opId: op.id });
+    return Promise.resolve();
+  }
+
+  // «Вне плана» — строка на экране сразу (временный uid tmp-<номер действия>), настоящий uid — с ответом сервера
+  function addItemQ(kind, name, fact, comment, target) {
+    const t = target || {};
+    const date = kind === 'preps' ? prepDay.value : work.data.today;
+    C.queueOp('work.add', { kind, tt: work.tt, name, fact, comment, date: kind === 'preps' ? date : undefined, at: Date.now() }, {
+      tt: work.tt, label: 'Вне плана · ' + name + ' — ' + fmt(fact) + ' ' + (t.unit || ''),
+      meta: { item: {
+        kind, date, name, amount: fact, unit: t.unit || '', group: t.group || '', thumb: t.thumb || '', place: t.place || [],
+        fact, comment: ['Вне плана', String(comment || '').trim()].filter(Boolean).join(': '), status: 'done',
+        employee: shiftEmployee(kind), statusAt: nowStamp(), updatedAt: '', parentUid: '', dishFor: '', dishId: t.dishId || '', over: false,
+      } },
+    });
+    showToast('Добавлено · ' + name);
+    return Promise.resolve({ item: null });
+  }
+
+  // Вернуть в работу. Отметка или «Вне плана» ещё не ушли на сервер — просто снять их из очереди
+  function unmarkItemQ(item, quiet) {
+    const uid = item.uid;
+    const unplanned = !item.parentUid && /^Вне плана/.test(item.comment || '');
+    const waiting = C.myOps().filter(o => o.state === 'wait' && o.tt === work.tt);
+    const add = waiting.find(o => o.method === 'work.add' && 'tmp-' + o.id === uid);
+    const save = waiting.find(o => o.method === 'work.saveMany' && o.params.items.length === 1 && o.params.items[0].uid === uid);
+    if (!(add && C.cancelOp(add.id)) && !(save && C.cancelOp(save.id))) {
+      C.queueOp('work.reset', { kind: item.kind, uid, expectedUpdatedAt: item.updatedAt },
+        { tt: work.tt, label: (unplanned ? 'Удалить «Вне плана» · ' : 'В работу · ') + item.name });
+    }
+    setDraft(uid, null);
+    if (!quiet) showToast((unplanned ? 'Удалено · ' : 'Возвращено в работу · ') + item.name);
+    return Promise.resolve(null);
+  }
+
+  // Смена: прошлый ещё не отправленный выбор той же роли заменяется новым
+  function setShiftQ(role, name) {
+    const before = Object.assign({}, work.data.shift);
+    const next = Object.assign({}, before, { [role]: name });
+    if (role === 'bar' && name && !before.prep) next.prep = name;
+    for (const o of C.myOps()) if (o.state === 'wait' && o.method === 'work.shift' && o.tt === work.tt && o.params.role === role) C.cancelOp(o.id);
+    C.queueOp('work.shift', { tt: work.tt, role, name }, {
+      tt: work.tt, label: (role === 'bar' ? 'Бармен: ' : 'Заготовщик: ') + (name || 'снят со смены'), meta: { shift: next },
+    });
+    return Promise.resolve();
+  }
+
+  // Ответ сервера на действие очереди — в work.base и копию на устройстве (если эта точка открыта)
+  function patchBase(tt, fn) {
+    if (!work.base || work.tt !== tt) return;
+    fn(work.base);
+    work.seq++;   // опрос, начатый до ответа, устарел
+    recompute();
+    C.cachePut('work.load', { tt }, work.base);
+  }
+  const baseListOf = (b, kind) => kind === 'preps' ? b.preps : b.dishes;
+
+  if (OFFLINE) {
+    watch(() => C.outbox.ops.map(o => o.id + o.state).join('|'), recompute);
+    watch(() => C.outbox.busy, b => { work.sync = b ? 'saving' : 'idle'; });
+    Object.assign(C.opHandlers, {
+      'work.saveMany': (op, data) => {
+        const map = {}, updated = {}, bad = [];
+        for (const r of data.results || []) {
+          if (!r.ok) {
+            bad.push(r.message);
+            const it = (op.params.items || []).find(x => x.uid === r.uid);
+            if (it && work.tt === op.tt) setDraft(r.uid, { fact: fmt(it.fact), comment: it.comment || '' });
+            continue;
+          }
+          updated[r.uid] = r.updatedAt;
+          if (r.rest) { map['tmp-' + r.uid] = r.rest.uid; updated[r.rest.uid] = r.rest.updatedAt; }
+        }
+        patchBase(op.tt, b => {
+          const list = baseListOf(b, op.params.kind);
+          for (const r of data.results || []) {
+            const i = r.ok ? list.findIndex(x => x.uid === r.uid) : -1;
+            if (i < 0) continue;
+            const cur = list[i];
+            list.splice(i, 1, Object.assign({}, cur, {
+              status: r.status, fact: r.fact, comment: r.comment, employee: r.employee, statusAt: r.statusAt, updatedAt: r.updatedAt, over: r.over, pending: false,
+            }));
+            if (r.rest && !list.some(x => x.uid === r.rest.uid)) {
+              list.push(Object.assign({}, cur, {
+                uid: r.rest.uid, parentUid: cur.uid, amount: r.rest.amount, fact: null, comment: '', status: 'todo',
+                employee: '', statusAt: '', updatedAt: r.rest.updatedAt, over: false, pending: false,
+              }));
+            }
+          }
+        });
+        return { map, updated, failed: bad.join(' · ') };
+      },
+      'work.reset': (op, data) => {
+        patchBase(op.tt, b => {
+          const list = baseListOf(b, op.params.kind);
+          for (const id of data.removedUids || []) { const i = list.findIndex(x => x.uid === id); if (i >= 0) list.splice(i, 1); }
+          if (data.item) {
+            const i = list.findIndex(x => x.uid === data.item.uid);
+            if (i >= 0) list.splice(i, 1, data.item); else list.push(data.item);
+            const set = setOf(b, data.item);
+            if (set) set.collected = false;
+          }
+        });
+        return { updated: data.item ? { [data.item.uid]: data.item.updatedAt } : {} };
+      },
+      'work.add': (op, data) => {
+        if (!data.item) return {};
+        patchBase(op.tt, b => { const list = baseListOf(b, op.params.kind); if (!list.some(x => x.uid === data.item.uid)) list.push(data.item); });
+        return { map: { ['tmp-' + op.id]: data.item.uid }, updated: { [data.item.uid]: data.item.updatedAt } };
+      },
+      'work.shift': (op, data) => { patchBase(op.tt, b => { b.shift = data; }); return {}; },
+      'work.smoothieDone': op => { patchBase(op.tt, b => { const set = smoothieOf(b, op.params); if (set) set.collected = true; }); return {}; },
+      // Сервер отказал — на экране как на сервере, причина — в уведомлении и журнале
+      fail: op => {
+        if (work.tt !== op.tt) return;
+        showToast('Не принято: ' + op.label + ' — ' + op.error, null, true);
+        setTimeout(() => load(true), 300);
+      },
+    });
   }
 
   function showToast(text, undoInfo, error) {
@@ -4260,6 +4720,13 @@ window.MFC = window.Vue ? (function () {
       const unmark = it => { unmarkItem(it); };
 
       async function collect(s) {
+        if (OFFLINE) {
+          C.queueOp('work.smoothieDone', { tt: work.tt, date: s.date, dish: s.dish, at: Date.now() }, { tt: work.tt, label: 'Набор собран · ' + s.dish });
+          showToast('Набор собран · ' + s.dish);
+          const next = list.value.find(x => !x.collected && x.key !== s.key);
+          openKey.value = next ? next.key : '';
+          return;
+        }
         collecting.value = s.key;
         try {
           await busy(() => callApi('work.smoothieDone', { tt: work.tt, date: s.date, dish: s.dish }));
@@ -4542,7 +5009,7 @@ window.MFC = window.Vue ? (function () {
         if (props.mode === 'add') {
           saving.value = true;
           try {
-            await addItem(props.kind, target.value.name, value, comment.value);
+            await addItem(props.kind, target.value.name, value, comment.value, target.value);
           } catch (e) {
             if (e.code === 'AUTH') return;
             banner.value = Object.assign({ text: e.code === 'NETWORK' ? 'Нет связи — попробуйте ещё раз' : e.message }, ERR[e.code] || { tone: 'error', icon: '#i-alert' });
@@ -10125,8 +10592,10 @@ window.MFC = window.Vue ? (function () {
       {
         id: 'p-offline', title: 'Пропал интернет',
         steps: [
-          'Вверху появится полоса «Нет связи с интернетом».',
-          'Если сохранение не прошло, приложение напишет «Не сохранено» — введённое останется в карточке. Нажмите «Сохранить» ещё раз, когда связь появится.',
+          'В приложении, установленном на телефон (иконка «БАР» на экране): работайте как обычно — отмечайте «Готово», «Частично», «Вне плана», возвращайте в работу, выбирайте смену. Всё сохраняется на телефоне сразу.',
+          'Вверху — полоса «Нет интернета · не отправлено: N». Нажмите её — откроется журнал: что сделано и ждёт отправки. Приложение можно закрыть и открыть снова — оно откроется и без интернета, с последними данными.',
+          'Появится связь — всё уйдёт само, по порядку, с тем временем, когда отмечали. «Не принято» — сервер отказал (например, позицию уже отметили с другого устройства): причина — в журнале, «Убрать» — убрать запись.',
+          'По обычной ссылке в браузере без интернета сохранить нельзя: приложение напишет «Не сохранено», введённое останется в карточке — нажмите «Сохранить» ещё раз, когда связь появится.',
           'Значок стрелок в шапке — подтянуть свежий план и отметки.',
         ],
       },
@@ -10329,7 +10798,8 @@ window.MFC = window.Vue ? (function () {
     { g: 'marks', q: 'Что значит «В работе»?', a: 'Вы начали вводить количество, но ещё не нажали «Сохранить». Откройте позицию и сохраните.', tags: 'статус в работе черновик' },
     { g: 'marks', q: 'Как отметить то, чего не было в плане?', a: 'Внизу списка — «Внеплановая позиция»: выберите блюдо или заготовку из справочника, введите количество, «Сохранить».', tags: 'вне плана добавить лишнее дополнительно' },
     { g: 'marks', q: 'Как понять, что отметка сохранилась?', a: 'Внизу появится «Сохранено», позиция перейдёт в «Готово». Если связи нет — будет «Не сохранено»: нажмите «Сохранить» ещё раз.', tags: 'сохранилось проверить' },
-    { g: 'marks', q: 'Пропал интернет — отметки потеряются?', a: 'Нет. Вверху будет «Нет связи с интернетом», а введённое останется в карточке. Когда связь появится, нажмите «Сохранить».', tags: 'нет связи оффлайн wi-fi вайфай' },
+    { g: 'marks', q: 'Пропал интернет — отметки потеряются?', a: 'Нет. В приложении, установленном на телефон, отмечайте как обычно: всё сохраняется на телефоне, вверху — «Нет интернета · не отправлено: N» (нажмите — журнал), а когда связь появится, уйдёт само. Приложение открывается и без интернета. По обычной ссылке в браузере введённое останется в карточке — нажмите «Сохранить», когда связь появится.', tags: 'нет связи оффлайн wi-fi вайфай без интернета журнал не отправлено очередь' },
+    { g: 'marks', q: 'Вверху «Не принято» — что это?', a: 'Отметку, сделанную без интернета, сервер не принял — обычно потому, что позицию уже отметили с другого устройства или день уже закрыт. Нажмите полосу: в журнале видна причина. На экране позиция — как на сервере; если нужно, отметьте заново. «Убрать» — убрать запись из журнала.', tags: 'не принято журнал очередь конфликт без интернета' },
     { g: 'marks', q: 'Где посмотреть состав блюда?', a: 'В карточке блюда — тех. карта: на план, а как только введёте количество — на него (сделаю 3 из 5 — состав на 3). Все блюда и заготовки — во вкладке «Справочник».', tags: 'тех карта техкарта рецепт состав' },
     { g: 'preps', q: 'Почему не видно заготовок?', a: 'Заготовки видны в окне заготовок точки — обычно с 17:00 накануне до 15:00 этого дня (у точки может быть своё окно). Если окно открыто, а списка нет — администратор ещё не рассчитал заготовки.', tags: 'заготовки пусто нет окно' },
     { g: 'preps', q: 'Почему видно сразу «Сегодня» и «Завтра»?', a: 'У точки окно заготовок начинается раньше, чем кончается вчерашнее: например, завтрашние заготовки видны уже с 8:00. Переключайте день вкладками; внеплановая заготовка записывается на открытый день.', tags: 'два дня вкладки сегодня завтра' },
@@ -11487,7 +11957,12 @@ html.mf-tr-open, html.mf-tr-open body { overflow: hidden; }
     </aside>
 
     <div class="app__content">
-      <div v-if="store.offline" class="net-status net-status--offline" role="status">
+      <!-- Без интернета (PWA): полоса-журнал — сколько действий ждут отправки или не приняты; нажатие — список -->
+      <button v-if="OFFLINE && journal.show" type="button" class="net-status wa-journal-bar" :class="'is-' + journal.tone" @click="outbox.open = true">
+        <svg class="icon icon--sm"><use :href="journal.icon"></use></svg><span>{{ journal.text }}</span>
+        <svg class="icon icon--sm wa-journal-bar__go"><use href="#i-chevron-right"></use></svg>
+      </button>
+      <div v-else-if="store.offline" class="net-status net-status--offline" role="status">
         <svg class="icon icon--sm"><use href="#i-wifi-off"></use></svg>Нет связи с интернетом
       </div>
       <div v-else-if="syncing" class="net-status net-status--sync" role="status">
@@ -11606,9 +12081,34 @@ html.mf-tr-open, html.mf-tr-open body { overflow: hidden; }
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="logout-title">
         <h2 class="modal__title" id="logout-title">Выйти из приложения?</h2>
         <p v-if="hasDevice" class="modal__text">Это устройство перестанет входить автоматически — для входа понадобится пароль.</p>
+        <p v-if="OFFLINE && journalWaiting" class="modal__text"><b>Не отправлено действий: {{ journalWaiting }}.</b> Они останутся на этом устройстве и уйдут, когда вы снова войдёте.</p>
         <div class="modal__actions">
           <button type="button" class="btn btn--ghost" @click="confirmLogout = false">Отмена</button>
           <button type="button" class="btn btn--danger" @click="logout">Выйти</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Журнал: действия в очереди на отправку и не принятые сервером (OFFLINE, ui_core: outbox) -->
+    <div v-if="OFFLINE" class="modal-backdrop" :class="{ 'is-open': outbox.open }" @click.self="outbox.open = false">
+      <div class="modal wa-journal" role="dialog" aria-modal="true" aria-labelledby="journal-title">
+        <h2 class="modal__title" id="journal-title">{{ journalFailed ? 'Не принято и не отправлено' : 'Не отправлено' }}</h2>
+        <p class="modal__text">{{ store.offline ? 'Нет интернета. Действия сохранены на этом устройстве и уйдут сами, как только появится связь — приложение можно закрывать.' : 'Действия уходят на сервер по очереди, в том порядке, в каком их сделали.' }}</p>
+        <div class="wa-journal__list">
+          <div v-for="o in journalOps" :key="o.id" class="wa-journal__row" :class="'is-' + o.state">
+            <span class="wa-journal__time">{{ timeOf(o.at) }}</span>
+            <span class="wa-journal__main"><b>{{ o.label }}</b><small>{{ [pointName(o.tt), stateText(o)].filter(Boolean).join(' · ') }}</small></span>
+            <button v-if="o.state === 'fail'" type="button" class="btn btn--ghost wa-journal__x" @click="cancelOp(o.id)">Убрать</button>
+          </div>
+          <div v-if="saladWaiting" class="wa-journal__row">
+            <span class="wa-journal__time">—</span>
+            <span class="wa-journal__main"><b>Салат-база: {{ saladWaiting }} {{ plural(saladWaiting, ['изменение', 'изменения', 'изменений']) }}</b><small>уйдут сами, когда раздел «Салат-база» открыт и есть связь</small></span>
+          </div>
+          <p v-if="!journalOps.length && !saladWaiting" class="modal__text">Всё отправлено.</p>
+        </div>
+        <div class="modal__actions">
+          <button type="button" class="btn btn--ghost" @click="outbox.open = false">Закрыть</button>
+          <button type="button" class="btn btn--primary" :disabled="outbox.busy || !journalWaiting" @click="sendNow">{{ outbox.busy ? 'Отправляем…' : 'Отправить сейчас' }}</button>
         </div>
       </div>
     </div>
@@ -11684,7 +12184,7 @@ html.mf-tr-open, html.mf-tr-open body { overflow: hidden; }
   }
 
   const { createApp, reactive, ref, computed, watch, nextTick, onMounted, onBeforeUnmount } = Vue;
-  const { store, LS, MF, initials, asset, ROLE_LABELS, toggleTheme, rawApi, loadApp, toLogin, boot, screen, navFor, leavePoint } = C;
+  const { store, LS, MF, initials, asset, ROLE_LABELS, toggleTheme, rawApi, loadApp, toLogin, boot, screen, navFor, leavePoint, plural } = C;
 
 
   const LoginView = {
@@ -11734,6 +12234,7 @@ html.mf-tr-open, html.mf-tr-open body { overflow: hidden; }
         try {
           const r = await rawApi('auth.login', { login: form.login, password: form.password, remember: form.remember });
           LS.set('mf-session', r.token);
+          LS.set('mf-session-login', r.user ? r.user.login : form.login.toLowerCase());
           LS.set('mf-device', r.deviceToken || null);
           LS.set('mf-last-login', form.login.toLowerCase());
           form.password = '';
@@ -11853,14 +12354,20 @@ html.mf-tr-open, html.mf-tr-open body { overflow: hidden; }
       onBeforeUnmount(() => C.point.stop());
 
       // Заголовки групп закрепляются под шапкой: её высота → --sticky-offset.
-      // Шапка появляется и позже — когда админ открывает точку.
+      // Шапка появляется и позже — когда админ открывает точку. Полоса-журнал (без интернета) закреплена над шапкой:
+      // её высота → --journal-h, шапка и заголовки — ниже на неё
       let ro = null;
+      function stickyOffsets() {
+        const bar = document.querySelector('.wa-journal-bar');
+        const jh = bar ? bar.offsetHeight : 0;
+        const root = document.documentElement.style;
+        root.setProperty('--journal-h', jh + 'px');
+        root.setProperty('--sticky-offset', (headerEl.value ? headerEl.value.offsetHeight : 0) + jh + 'px');
+      }
       watch(headerEl, el => {
         if (ro) ro.disconnect();
         if (!el || !window.ResizeObserver) return;
-        ro = new ResizeObserver(() => {
-          document.documentElement.style.setProperty('--sticky-offset', el.offsetHeight + 'px');
-        });
+        ro = new ResizeObserver(stickyOffsets);
         ro.observe(el);
       }, { flush: 'post' });
       onBeforeUnmount(() => ro && ro.disconnect());
@@ -11897,14 +12404,54 @@ html.mf-tr-open, html.mf-tr-open body { overflow: hidden; }
         confirmLogout.value = false;
         try { await rawApi('auth.logout', { deviceToken: LS.get('mf-device') }); } catch (e) {}
         LS.set('mf-device', null);
+        C.forgetDevice();
         toLogin();
       }
+
+      // ---------------------------------------------------------------- журнал очереди (OFFLINE, 2026-10-26)
+      const OFFLINE = C.OFFLINE;
+      const outbox = C.outbox;
+      const journalOps = computed(() => C.myOps().slice().sort((a, b) => a.at - b.at));
+      const journalFailed = computed(() => journalOps.value.filter(o => o.state === 'fail').length);
+      // Очередь салат-базы — своя (ui_salad.html, на устройстве): здесь только её размер
+      const saladWaiting = ref(0);
+      if (OFFLINE) {
+        const readSalad = () => {
+          let n = 0;
+          try { const a = JSON.parse(LS.get('mf-salad-outbox:' + (store.user ? store.user.login : '')) || '[]'); n = Array.isArray(a) ? a.length : 0; } catch (e) { n = 0; }
+          saladWaiting.value = n;
+        };
+        readSalad();
+        setInterval(readSalad, 3000);
+      }
+      const journalWaiting = computed(() => journalOps.value.length - journalFailed.value + saladWaiting.value);
+      const journal = computed(() => {
+        const n = journalWaiting.value;
+        const bad = journalFailed.value;
+        if (bad) return { show: true, tone: 'fail', icon: '#i-alert', text: 'Не принято: ' + bad + (n ? ' · не отправлено: ' + n : '') };
+        if (store.offline) return { show: true, tone: 'offline', icon: '#i-wifi-off', text: n ? 'Нет интернета · не отправлено: ' + n : 'Нет интернета · работаем без него' };
+        if (n) return { show: true, tone: 'sync', icon: '#i-refresh', text: (outbox.busy ? 'Отправляем · ' : 'Ждут отправки · ') + n };
+        return { show: false };
+      });
+      const timeOf = ms => {
+        const d = new Date(ms);
+        const p = n => String(n).padStart(2, '0');
+        const today = new Date().toDateString() === d.toDateString();
+        return (today ? '' : p(d.getDate()) + '.' + p(d.getMonth() + 1) + ' ') + p(d.getHours()) + ':' + p(d.getMinutes());
+      };
+      const pointName = tt => { const p = store.points.find(x => x.tt === tt); return p ? p.name : tt || ''; };
+      const stateText = o => o.state === 'send' ? 'отправляется…' : o.state === 'fail' ? 'не принято: ' + o.error
+        : o.error ? 'ждёт, повторим: ' + o.error : 'ждёт отправки';
+      const cancelOp = id => C.cancelOp(id);
+      const sendNow = () => { outbox.tries = 0; C.kickOps(0); };
+      if (OFFLINE) watch(() => journal.value.show && journal.value.text, () => nextTick(stickyOffsets), { immediate: true });
 
       return {
         store, nav, isPoint, isPointUser, adminInPoint, point, todayLabel, currentScreen, roleLabel, themeIcon, initials,
         bottomItems, activeBottom, shift, shiftChips, shiftLine, shortName, confirmLogout, syncing, hasDevice, headerEl,
         go, refresh, logout, toggleTheme, leavePoint,
         helpMenu, supportOpen, copied, phoneEl, copyPhone, SUPPORT,
+        OFFLINE, outbox, journal, journalOps, journalFailed, journalWaiting, saladWaiting, timeOf, pointName, stateText, cancelOp, sendNow, plural,
       };
     },
   };
