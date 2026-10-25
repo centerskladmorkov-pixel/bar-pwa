@@ -10,6 +10,13 @@
   "orientation": "any",
   "background_color": "#f9f5dd",
   "theme_color": "#f9f5dd",
+  "related_applications": [
+    {
+      "platform": "webapp",
+      "url": "https://centerskladmorkov-pixel.github.io/bar-pwa/manifest.webmanifest"
+    }
+  ],
+  "prefer_related_applications": false,
   "icons": [
     {
       "src": "icons/icon-192.png",

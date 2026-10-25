@@ -11,7 +11,7 @@
   <link rel="icon" href="icons/favicon.ico" sizes="any">
   <link rel="icon" href="icons/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <script>window.MF_API_URL = "https://script.google.com/macros/s/AKfycbwdLMirInPu-iEuonQ9OSqvqfujJ3jgjUz23TS5sbzLF5M5ExgEpRvA_Gj8fPfVbHa9/exec"; window.MF_BUILD = "202610252347-1260615a"; window.MF_OFFLINE = true;</script>
+  <script>window.MF_API_URL = "https://script.google.com/macros/s/AKfycbwdLMirInPu-iEuonQ9OSqvqfujJ3jgjUz23TS5sbzLF5M5ExgEpRvA_Gj8fPfVbHa9/exec"; window.MF_BUILD = "202610252355-0dbef445"; window.MF_OFFLINE = true;</script>
   <style>
   #mf-pwa-update { position: fixed; left: 50%; top: calc(env(safe-area-inset-top, 0px) + 10px); transform: translateX(-50%); z-index: 200;
     display: flex; align-items: center; gap: 12px; max-width: calc(100vw - 24px); padding: 8px 8px 8px 16px; border-radius: 999px;
@@ -2460,6 +2460,158 @@ html[data-layout="tablet"] .wa-news-pub__row .btn, html[data-layout="desktop"] .
 
 </head>
 <body>
+<!-- Экран «Скачать приложение» (PWA, 2026-10-26): открыли ссылку в браузере (не установленное приложение) — сначала он.
+     «Скачать приложение» — системное окно установки (Chrome, Android: beforeinstallprompt), иконка «БАР» встаёт на экран
+     телефона. Нет такого окна (iPhone, браузер его не предложил) — шаги, как установить вручную. «Открыть в браузере» —
+     приложение в этой вкладке (до её закрытия экран не показывается). Вид — как экран входа: купола, фрукты, капли.
+     Вставляется сразу после <body> сборкой tools/build_pwa.js; в приложение Apps Script не входит. -->
+<style>
+  #mf-install { position: fixed; inset: 0; z-index: 300; display: flex; flex-direction: column; overflow: hidden auto; background: var(--brand-green-dark, #0b3220); }
+  #mf-install[hidden] { display: none; }
+  #mf-install .login__brand { flex: 1 0 auto; min-height: 220px; }
+  #mf-install .login__art img:not([src]) { display: none; }
+  .mf-inst__card { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 16px; width: 100%; max-width: 560px; margin: 0 auto;
+    padding: 26px var(--space-5, 20px) calc(28px + env(safe-area-inset-bottom)); border-radius: var(--radius-xl, 28px) var(--radius-xl, 28px) 0 0;
+    background: var(--bg, #f9f5dd); color: var(--text); animation: mf-inst-up 520ms cubic-bezier(.2, .8, .2, 1) both; }
+  .mf-inst__app { display: flex; align-items: center; gap: 14px; }
+  .mf-inst__icon { flex: none; width: 64px; height: 64px; border-radius: 18px; box-shadow: 0 8px 22px rgba(11, 50, 32, .22); animation: mf-inst-bob 4.5s ease-in-out infinite; }
+  .mf-inst__title { margin: 0; font: 700 22px/1.15 var(--font-display); color: var(--text-brand); }
+  .mf-inst__sub { margin: 4px 0 0; font-size: 14px; color: var(--text-muted); }
+  .mf-inst__list { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 0; list-style: none; }
+  .mf-inst__list li { display: flex; align-items: flex-start; gap: 10px; font-size: 15px; line-height: 1.35; }
+  .mf-inst__list .icon { flex: none; width: 22px; height: 22px; padding: 3px; border-radius: 50%; background: color-mix(in oklab, var(--fresh, #2e8b57) 16%, transparent); color: var(--fresh, #2e8b57); stroke-width: 3; }
+  .mf-inst__go { position: relative; isolation: isolate; }
+  .mf-inst__go::after { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: inherit; animation: mf-inst-pulse 2.6s ease-out infinite; }
+  .mf-inst__go .icon { width: 22px; height: 22px; }
+  .mf-inst__later { align-self: center; padding: 6px 12px; border: 0; background: none; color: var(--text-brand); font: inherit; font-size: 15px; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+  .mf-inst__panel { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border-radius: var(--radius-md, 16px); background: var(--surface, #fff); box-shadow: var(--shadow-sm); animation: mf-inst-up 360ms ease both; }
+  .mf-inst__panel[hidden] { display: none; }
+  .mf-inst__panel b { font: 700 16px var(--font-display); color: var(--text-brand); }
+  .mf-inst__panel ol { display: flex; flex-direction: column; gap: 8px; margin: 0; padding-left: 22px; font-size: 15px; line-height: 1.35; }
+  .mf-inst__panel.is-done { background: color-mix(in oklab, var(--fresh, #2e8b57) 14%, var(--surface, #fff)); }
+  .mf-inst__panel.is-done b { color: var(--fresh, #2e8b57); }
+  .mf-inst__panel p { margin: 0; font-size: 15px; line-height: 1.4; }
+  .mf-inst__kbd { display: inline-block; min-width: 1.4em; padding: 0 6px; border-radius: 6px; background: var(--surface-2, #f1ecd2); font-weight: 700; text-align: center; }
+  @keyframes mf-inst-up { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: none; } }
+  @keyframes mf-inst-bob { 0%, 100% { transform: translateY(0) rotate(-2deg); } 50% { transform: translateY(-5px) rotate(2deg); } }
+  @keyframes mf-inst-pulse { 0% { opacity: .55; transform: scale(1); } 70%, 100% { opacity: 0; transform: scale(1.08, 1.35); } }
+  @media (min-width: 640px) { .mf-inst__card { margin-bottom: 32px; border-radius: var(--radius-xl, 28px); } }
+  @media (prefers-reduced-motion: reduce) { #mf-install *, #mf-install *::after { animation: none !important; } }
+</style>
+<div id="mf-install" role="dialog" aria-modal="true" aria-labelledby="mf-inst-title" hidden>
+  <div class="login__art" aria-hidden="true">
+    <span class="login__dome login__dome--green"></span>
+    <span class="login__dome login__dome--carrot"></span>
+    <img class="login__fruit" data-asset="strawberry" alt="" style="left:9%;top:11%;--w:64px;--t:6s">
+    <img class="login__fruit" data-asset="lemon" alt="" style="right:9%;top:9%;--w:76px;--t:7s;--delay:-2s">
+    <img class="login__fruit" data-asset="avocado" alt="" style="left:13%;top:29%;--w:58px;--t:8s;--delay:-4s">
+    <img class="login__fruit" data-asset="carrot" alt="" style="right:18%;top:26%;--w:70px;--t:6.5s;--delay:-1s">
+    <img class="login__fruit" data-asset="plum" alt="" style="left:26%;top:4%;--w:48px;--t:7.5s;--delay:-3s">
+    <span class="login__drop" style="left:31%;top:18%;--t:4s"></span>
+    <span class="login__drop" style="left:64%;top:14%;--t:5s;--delay:-2s;--c:var(--group-fresh)"></span>
+    <span class="login__drop" style="left:77%;top:21%;--t:4.6s;--delay:-1s;--c:var(--brand-cream)"></span>
+  </div>
+  <div class="login__brand">
+    <svg class="login__mark" viewBox="203 256 50 72" aria-hidden="true"><path fill="var(--brand-cream)" d="M247.9,260.7c-4.8-4.8-12.5-4.8-17.2,0l-2.6,2.6-2.6-2.6c-4.8-4.8-12.5-4.8-17.2,0h0c-4.8,4.8-4.8,12.5,0,17.2l2.6,2.6,17.2,17.2,17.2-17.2,2.6-2.6c4.8-4.8,4.8-12.5,0-17.2Z"/><path fill="var(--brand-carrot)" d="M250.3,326.7h-44.7c-.5-2-.8-3.9-.8-5.8,0-12.3,10-23,23.1-23s26.1,14.3,22.3,28.9Z"/></svg>
+    <div>
+      <div class="login__name">морковь фрут</div>
+      <div class="login__sub">БАР</div>
+    </div>
+  </div>
+  <div class="mf-inst__card">
+    <div class="mf-inst__app">
+      <img class="mf-inst__icon" src="icons/icon-192.png" alt="">
+      <div>
+        <h1 class="mf-inst__title" id="mf-inst-title">Приложение «БАР»</h1>
+        <p class="mf-inst__sub">Отметки, заготовки, салат-база — на экране телефона</p>
+      </div>
+    </div>
+    <ul class="mf-inst__list">
+      <li><svg class="icon"><use href="#i-check"></use></svg>Иконка на экране — открывается одним нажатием, без браузера</li>
+      <li><svg class="icon"><use href="#i-check"></use></svg>Работает без интернета: отметки сохранятся и уйдут сами</li>
+      <li><svg class="icon"><use href="#i-check"></use></svg>Открывается сразу — не нужно ждать загрузки</li>
+    </ul>
+    <div class="mf-inst__panel" data-panel="android" hidden>
+      <b>Установите за три шага</b>
+      <ol>
+        <li>Нажмите <span class="mf-inst__kbd">⋮</span> в правом верхнем углу браузера</li>
+        <li>Выберите «Установить приложение» или «Добавить на главный экран»</li>
+        <li>Нажмите «Установить» — иконка «БАР» появится на экране</li>
+      </ol>
+    </div>
+    <div class="mf-inst__panel" data-panel="ios" hidden>
+      <b>Установите за три шага</b>
+      <ol>
+        <li>Нажмите «Поделиться» <span class="mf-inst__kbd">⬆</span> внизу Safari</li>
+        <li>Выберите «На экран „Домой“»</li>
+        <li>Нажмите «Добавить» — иконка «БАР» появится на экране</li>
+      </ol>
+    </div>
+    <div class="mf-inst__panel is-done" data-panel="done" hidden>
+      <b>Готово — приложение установлено</b>
+      <p>Иконка «БАР» — на экране телефона. Открывайте приложение с неё: так оно работает и без интернета.</p>
+    </div>
+    <div class="mf-inst__panel is-done" data-panel="have" hidden>
+      <b>Приложение уже установлено</b>
+      <p>Откройте его иконкой «БАР» на экране телефона.</p>
+    </div>
+    <button type="button" class="btn btn--primary btn--lg btn--block mf-inst__go" data-act="install">
+      <svg class="icon"><use href="#i-download"></use></svg><span>Скачать приложение</span>
+    </button>
+    <button type="button" class="mf-inst__later" data-act="later">Открыть в браузере</button>
+  </div>
+</div>
+<script>
+(function () {
+  var box = document.getElementById('mf-install');
+  var standalone = (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+  var skip = false;
+  try { skip = sessionStorage.getItem('mf-install-skip') === '1'; } catch (e) { skip = false; }
+  // Окно установки браузер даёт один раз — запомнить, кнопка вызовет его по нажатию
+  var prompt = null;
+  window.addEventListener('beforeinstallprompt', function (e) { e.preventDefault(); prompt = e; });
+  window.addEventListener('appinstalled', function () { show('done'); });
+  if (standalone || skip || !box) return;
+  box.hidden = false;
+  document.documentElement.style.overflow = 'hidden';
+
+  var ios = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  var go = box.querySelector('[data-act="install"]');
+  function show(name) {
+    [].forEach.call(box.querySelectorAll('[data-panel]'), function (p) { p.hidden = p.getAttribute('data-panel') !== name; });
+    if (name === 'done' || name === 'have') {
+      go.hidden = true;
+      box.querySelector('[data-act="later"]').textContent = 'Продолжить в браузере';
+    }
+  }
+  function close() {
+    try { sessionStorage.setItem('mf-install-skip', '1'); } catch (e) {}
+    box.hidden = true;
+    document.documentElement.style.overflow = '';
+  }
+  go.addEventListener('click', function () {
+    if (prompt) {
+      var p = prompt;
+      prompt = null;
+      try { p.prompt(); } catch (e) { show(ios ? 'ios' : 'android'); return; }
+      p.userChoice.then(function (c) { if (c && c.outcome === 'accepted') show('done'); else show(ios ? 'ios' : 'android'); }, function () {});
+      return;
+    }
+    show(ios ? 'ios' : 'android');
+  });
+  box.querySelector('[data-act="later"]').addEventListener('click', close);
+  // Уже установлено (Chrome, Android) — сказать об этом, а не предлагать снова
+  if (navigator.getInstalledRelatedApps) {
+    navigator.getInstalledRelatedApps().then(function (list) { if (list && list.length) show('have'); }).catch(function () {});
+  }
+  // Фрукты — картинки приложения (ui_assets, ниже по странице)
+  document.addEventListener('DOMContentLoaded', function () {
+    var a = window.MF_ASSETS || {};
+    [].forEach.call(box.querySelectorAll('img[data-asset]'), function (img) { if (a[img.getAttribute('data-asset')]) img.src = a[img.getAttribute('data-asset')]; });
+  });
+})();
+</script>
+
   <!-- Сгенерировано tools/build_ui.js — не править вручную. -->
 <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
 <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
