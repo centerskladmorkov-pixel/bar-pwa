@@ -11,7 +11,7 @@
   <link rel="icon" href="icons/favicon.ico" sizes="any">
   <link rel="icon" href="icons/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <script>window.MF_API_URL = "https://script.google.com/macros/s/AKfycbwdLMirInPu-iEuonQ9OSqvqfujJ3jgjUz23TS5sbzLF5M5ExgEpRvA_Gj8fPfVbHa9/exec"; window.MF_BUILD = "202610252355-0dbef445"; window.MF_OFFLINE = true;</script>
+  <script>window.MF_API_URL = "https://script.google.com/macros/s/AKfycbwdLMirInPu-iEuonQ9OSqvqfujJ3jgjUz23TS5sbzLF5M5ExgEpRvA_Gj8fPfVbHa9/exec"; window.MF_BUILD = "202611161841-bedfc499"; window.MF_OFFLINE = true;</script>
   <style>
   #mf-pwa-update { position: fixed; left: 50%; top: calc(env(safe-area-inset-top, 0px) + 10px); transform: translateX(-50%); z-index: 200;
     display: flex; align-items: center; gap: 12px; max-width: calc(100vw - 24px); padding: 8px 8px 8px 16px; border-radius: 999px;
@@ -2456,6 +2456,44 @@ html[data-layout="tablet"] .wa-news-pub__row .btn, html[data-layout="desktop"] .
 .wa-journal__row.is-fail small { color: var(--danger); }
 .wa-journal__x { flex: none; min-height: 36px; padding: 0 12px; font-size: 13px; }
 
+/* Значок синхронизации (2026-11-16, ui_app.html): сколько действий не выгружено — справа внизу над нижним меню,
+   поверх экрана (ничего не сдвигает); на ПК — в углу. Над панелью действия («Расчёт заготовок», салат-база) — выше неё */
+.wa-sync {
+  position: fixed; right: var(--space-3); bottom: calc(var(--bottom-nav-h) + env(safe-area-inset-bottom) + var(--space-2)); z-index: 25;
+  display: inline-flex; align-items: center; gap: 7px; height: 34px; max-width: calc(100vw - 24px); padding: 0 8px 0 11px;
+  border: 0; border-radius: 999px; font: 700 12.5px var(--font-body); white-space: nowrap; cursor: pointer;
+  background: var(--inverse); color: var(--on-inverse); box-shadow: var(--shadow-md);
+  animation: wa-sync-in 200ms var(--ease) both;
+}
+.wa-sync .icon { flex: none; width: 16px; height: 16px; }
+.wa-sync__spin { flex: none; width: 14px; height: 14px; border-width: 2px; border-color: color-mix(in oklab, currentColor 30%, transparent); border-top-color: currentColor; }
+.wa-sync__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.wa-sync__n { flex: none; min-width: 22px; height: 22px; padding: 0 6px; border-radius: 999px; background: var(--brand-carrot); color: #fff; font-size: 12px; line-height: 22px; text-align: center; font-variant-numeric: tabular-nums; }
+.wa-sync.is-wait { background: var(--partial); color: var(--brand-green-dark); }
+.wa-sync.is-ok { padding-right: 13px; background: var(--fresh); color: var(--bg); }
+@keyframes wa-sync-in { from { opacity: 0; transform: translateY(8px) scale(.96); } }
+.app:has(.wa-actionbar:not(.wa-actionbar--static)) .wa-sync,
+.app:has(.wa-sb-bottom) .wa-sync { bottom: calc(var(--bottom-nav-h) + env(safe-area-inset-bottom) + 88px); }
+html[data-layout="desktop"] .wa-sync { right: var(--space-5); bottom: var(--space-5); }
+@media (min-width: 1280px) {
+html[data-layout="auto"][data-layout="auto"] .wa-sync { right: var(--space-5); bottom: var(--space-5); }
+
+}
+
+html[data-layout="desktop"][data-layout="auto"] .wa-sync { right: var(--space-5); bottom: var(--space-5); }
+
+
+html[data-layout="desktop"] .app:has(.wa-actionbar:not(.wa-actionbar--static)) .wa-sync,
+html[data-layout="desktop"] .app:has(.wa-sb-bottom) .wa-sync { bottom: 96px; }
+@media (min-width: 1280px) {
+html[data-layout="auto"][data-layout="auto"] .app:has(.wa-actionbar:not(.wa-actionbar--static)) .wa-sync, html[data-layout="auto"][data-layout="auto"] .app:has(.wa-sb-bottom) .wa-sync { bottom: 96px; }
+
+}
+
+html[data-layout="desktop"][data-layout="auto"] .app:has(.wa-actionbar:not(.wa-actionbar--static)) .wa-sync, html[data-layout="desktop"][data-layout="auto"] .app:has(.wa-sb-bottom) .wa-sync { bottom: 96px; }
+
+
+
 </style>
 
 </head>
@@ -2980,7 +3018,21 @@ window.MFC = window.Vue ? (function () {
 
   // Для экранов: истёкшую сессию молча восстанавливаем по токену устройства.
   // Без интернета (OFFLINE) чтение отдаёт последнюю копию с устройства — экран открывается, как был
+  // «Сервер занят» (общую блокировку держит другой запрос — это действие не выполнялось, повтор безопасен) — экран
+  // отказа не видит: до трёх повторов с паузой 1,5 → 3 → 5 с (2026-11-16)
+  const BUSY_WAIT = [1500, 3000, 5000];
   async function callApi(method, params, opId) {
+    for (let i = 0; ; i++) {
+      try {
+        return await callApiOnce(method, params, opId);
+      } catch (e) {
+        if (e.code !== 'BUSY' || i >= BUSY_WAIT.length) throw e;
+        await new Promise(r => setTimeout(r, BUSY_WAIT[i]));
+      }
+    }
+  }
+
+  async function callApiOnce(method, params, opId) {
     const key = OFFLINE && READ_CACHE.has(method) ? cacheKey(method, params) : '';
     try {
       const data = await callNet(method, params, opId);
@@ -3020,16 +3072,28 @@ window.MFC = window.Vue ? (function () {
   // Экран точки меняет загруженные данные ответами очереди — копия на устройстве тоже должна быть свежей
   const cachePut = (method, params, data) => { if (OFFLINE) IDB.set(cacheKey(method, params), { at: Date.now(), data }); };
 
-  // ------------------------------------------------------------------ очередь действий (OFFLINE, 2026-10-26)
-  // Действия точки (отметки, «Вне плана», возврат в работу, смена, «Набор собран») — сразу на экране и в очередь на
-  // устройстве (localStorage: переживает закрытие приложения), на сервер — по одному и по порядку, когда есть связь.
-  // У действия свой номер (opId): потерялся ответ — сервер не выполнит его второй раз (api()). Сервер отказал
-  // (позицию уже отметили с другого устройства, день закрыт…) — действие остаётся в журнале «Не принято» с причиной.
-  // op: { id, login, method, params, at, label, tt, state: wait | send | fail, error, tries }
+  // ------------------------------------------------------------------ очередь действий (2026-10-26, всегда — с 2026-11-16)
+  // Правки (отметки точки, «Вне плана», возврат в работу, смена, «Набор собран», цифры автоплана) — сразу на экране и в
+  // очередь на устройстве (localStorage: переживает закрытие приложения), на сервер — по одному запросу за раз и по
+  // порядку. Так быстрый ввод не упирается в общую блокировку сервера: раньше каждая цифра шла своим запросом
+  // одновременно с остальными, запросы не дожидались блокировки 15 с и падали «Сервер занят» (16.11, «Автоплан»).
+  // «Сервер занят», нет связи, нужен вход — действие ждёт и уходит само. Подряд идущие правки одного вида — одной пачкой
+  // (BATCH: одна блокировка и одна запись листа); правка того же (key) до отправки заменяет прежнюю. У действия свой
+  // номер (opId): потерялся ответ — сервер не выполнит его второй раз (api()). Сервер отказал (позицию уже отметили с
+  // другого устройства, день закрыт…) — действие остаётся в журнале «Не принято» с причиной.
+  // op: { id, login, method, params, at, label, tt, key, state: wait | send | fail, error, tries }
+  const QUEUE = true;
   const OUTBOX_KEY = 'mf-outbox';
   const RETRY_CODES = ['NETWORK', 'BUSY', 'AUTH', 'EMPTY', 'INTERNAL'];
-  const outbox = reactive({ ops: readOps(), busy: false, open: false, tries: 0 });
-  const opHandlers = {};   // method → (op, data) => { map, updated, failed } — экран точки: ответ сервера на экран; fail — отказ
+  // Почему действие ждёт — строкой журнала
+  const WAIT_TEXT = { NETWORK: 'нет связи', BUSY: 'сервер занят', AUTH: 'нужен вход', EMPTY: 'сервер не ответил', INTERNAL: 'ошибка сервера' };
+  // Пачки: метод одной правки → метод сервера для многих (ответ — results по порядку). Сервер его ещё не знает (старая
+  // версия) — правки уходят по одной
+  const BATCH = { 'admin.autoplan.setCell': { method: 'admin.autoplan.setCellMany', max: 40 } };
+  const batchOff = {};
+  // retry — почему очередь ждёт повтора (BUSY, NETWORK…; '' — не ждёт): значок синхронизации пишет «сервер занят»
+  const outbox = reactive({ ops: readOps(), busy: false, open: false, tries: 0, retry: '' });
+  const opHandlers = {};   // method → (op, data) => { map, updated, failed } — экран: ответ сервера на экран; fail — отказ
   let opsTimer = null;
 
   function readOps() {
@@ -3042,10 +3106,19 @@ window.MFC = window.Vue ? (function () {
   function saveOps() { LS.set(OUTBOX_KEY, outbox.ops.length ? JSON.stringify(outbox.ops) : null); }
   const myOps = () => outbox.ops.filter(o => store.user && o.login === store.user.login);
 
+  // info.key — та же правка (ячейка автоплана): ещё не отправленная прежняя заменяется новой на своём месте в очереди
   function queueOp(method, params, info) {
+    const key = info && info.key;
+    const same = key ? outbox.ops.find(o => o.state === 'wait' && o.method === method && o.key === key && store.user && o.login === store.user.login) : null;
+    if (same) {
+      Object.assign(same, info, { params, at: Date.now(), error: '' });
+      saveOps();
+      kickOps(0);
+      return same;
+    }
     const op = Object.assign({
       id: 'op' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8), login: store.user.login,
-      method, params, at: Date.now(), label: method, tt: '', state: 'wait', error: '', tries: 0,
+      method, params, at: Date.now(), label: method, tt: '', key: '', state: 'wait', error: '', tries: 0,
     }, info);
     outbox.ops.push(op);
     saveOps();
@@ -3063,9 +3136,31 @@ window.MFC = window.Vue ? (function () {
   }
 
   function kickOps(ms) {
-    if (!OFFLINE) return;
+    if (!QUEUE) return;
     clearTimeout(opsTimer);
     opsTimer = setTimeout(sendOps, ms == null ? 300 : ms);
+  }
+
+  // Ждать перед повтором: «Сервер занят» — коротко, 1,5 → 3 → 6 → 8 с (сервер уже ждал блокировку 15 с, её держат
+  // секунды), нет связи — дольше
+  function retryIn(code) {
+    const n = Math.min(outbox.tries - 1, 5);
+    return code === 'BUSY' ? Math.min(8000, 1500 * Math.pow(2, n)) : Math.min(60000, 2000 * Math.pow(2, n));
+  }
+
+  // Следом за op — ждущие правки того же вида (не принятые пропускаются, другое действие — конец пачки)
+  function groupFrom(op) {
+    const b = BATCH[op.method];
+    if (!b || batchOff[op.method]) return [op];
+    const list = myOps();
+    const out = [op];
+    for (let i = list.indexOf(op) + 1; i < list.length && out.length < b.max; i++) {
+      const o = list[i];
+      if (o.state === 'fail') continue;
+      if (o.state !== 'wait' || o.method !== op.method) break;
+      out.push(o);
+    }
+    return out;
   }
 
   async function sendOps() {
@@ -3074,34 +3169,53 @@ window.MFC = window.Vue ? (function () {
     try {
       for (;;) {
         const op = myOps().find(o => o.state === 'wait');
-        if (!op) { outbox.tries = 0; break; }
-        op.state = 'send';
+        if (!op) { outbox.tries = 0; outbox.retry = ''; break; }
+        const group = groupFrom(op);
+        const batch = BATCH[op.method] && !batchOff[op.method] ? BATCH[op.method] : null;
+        group.forEach(o => { o.state = 'send'; });
         saveOps();
         let data = null, err = null;
         // Копия параметров: в очереди они — живой объект Vue, а отправке нужен обычный
-        try { data = await callNet(op.method, JSON.parse(JSON.stringify(op.params)), op.id); } catch (e) { err = e; }
-        // Нет связи, сервер занят, нужен вход — действие ждёт; ошибка сервера — до трёх повторов
-        if (err && RETRY_CODES.includes(err.code) && !(err.code === 'INTERNAL' && op.tries >= 2)) {
-          Object.assign(op, { state: 'wait', error: err.code === 'NETWORK' ? '' : err.message, tries: op.tries + (err.code === 'INTERNAL' ? 1 : 0) });
-          saveOps();
-          outbox.tries++;
-          if (err.code !== 'AUTH') kickOps(Math.min(60000, 2000 * Math.pow(2, Math.min(outbox.tries - 1, 5))));
-          break;
-        }
-        let fx = {};
-        if (!err && opHandlers[op.method]) {
-          try { fx = opHandlers[op.method](op, data) || {}; } catch (e) { console.error('Очередь: ответ', op.method, e); }
-        }
-        // Часть пачки принята — её ответ всё равно правит следующие действия
-        if (fx.map || fx.updated) rewriteOps(fx.map || {}, fx.updated || {});
-        const failed = err ? err.message : fx.failed;
-        if (failed) {
-          Object.assign(op, { state: 'fail', error: failed });
-          saveOps();
-          if (opHandlers.fail) { try { opHandlers.fail(op, err); } catch (e) { console.error('Очередь: отказ', e); } }
+        const plain = o => JSON.parse(JSON.stringify(o.params));
+        try {
+          data = batch ? await callNet(batch.method, { items: group.map(plain) }) : await callNet(op.method, plain(op), op.id);
+        } catch (e) { err = e; }
+        // Сервер (старая версия) не знает пакетного метода — по одной
+        if (batch && err && err.code === 'NOT_FOUND') {
+          batchOff[op.method] = true;
+          group.forEach(o => { o.state = 'wait'; });
           continue;
         }
-        outbox.ops.splice(outbox.ops.indexOf(op), 1);
+        // Нет связи, сервер занят, нужен вход — правки ждут; ошибка сервера — до трёх повторов
+        if (err && RETRY_CODES.includes(err.code) && !(err.code === 'INTERNAL' && op.tries >= 2)) {
+          group.forEach(o => Object.assign(o, { state: 'wait', error: WAIT_TEXT[err.code] || '', tries: o.tries + (err.code === 'INTERNAL' ? 1 : 0) }));
+          saveOps();
+          outbox.tries++;
+          outbox.retry = err.code;
+          if (err.code !== 'AUTH') kickOps(retryIn(err.code));
+          break;
+        }
+        outbox.retry = '';
+        const results = batch && !err ? (data && Array.isArray(data.results) ? data.results : []) : null;
+        group.forEach((o, i) => {
+          const res = results ? results[i] : null;
+          const bad = err ? err.message : results && !(res && res.ok) ? (res && res.message) || 'Сервер не подтвердил' : '';
+          let fx = {};
+          if (!bad && opHandlers[o.method]) {
+            try { fx = opHandlers[o.method](o, results ? res : data) || {}; } catch (e) { console.error('Очередь: ответ', o.method, e); }
+          }
+          // Часть пачки принята — её ответ всё равно правит следующие действия
+          if (fx.map || fx.updated) rewriteOps(fx.map || {}, fx.updated || {});
+          const failed = bad || fx.failed;
+          if (failed) {
+            Object.assign(o, { state: 'fail', error: failed, code: err ? err.code : res ? res.code || '' : '' });
+            // Свой обработчик отказа у вида правки ('fail:<метод>'), иначе общий (экран точки)
+            const fh = opHandlers['fail:' + o.method] || opHandlers.fail;
+            if (fh) { try { fh(o, err || res); } catch (e) { console.error('Очередь: отказ', e); } }
+          } else {
+            outbox.ops.splice(outbox.ops.indexOf(o), 1);
+          }
+        });
         saveOps();
         outbox.tries = 0;
       }
@@ -3127,8 +3241,23 @@ window.MFC = window.Vue ? (function () {
     }
   }
 
+  // Дождаться, пока правки (кроме не принятых) уйдут на сервер: перед действиями, которые меняют то же целиком
+  // («Отправить план», «Заменить расчётом», «Во все точки»…). true — всё ушло; false — не успело за ms
+  function flushOps(ms, pick) {
+    const left = () => myOps().filter(o => o.state !== 'fail' && (!pick || pick(o))).length;
+    if (!left()) return Promise.resolve(true);
+    outbox.tries = 0;
+    kickOps(0);
+    const until = Date.now() + (ms || 30000);
+    return new Promise(res => {
+      const t = setInterval(() => {
+        if (!left()) { clearInterval(t); res(true); } else if (Date.now() > until) { clearInterval(t); res(false); }
+      }, 200);
+    });
+  }
+
   // Отправить, как только появилась связь, вернулись в приложение, вошли; ждущее — проверять раз в полминуты
-  if (OFFLINE) {
+  if (QUEUE) {
     window.addEventListener('online', () => kickOps(0));
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') kickOps(0); });
     watch(() => store.phase === 'app' && store.user && store.user.login, on => { if (on) kickOps(500); });
@@ -3407,7 +3536,7 @@ window.MFC = window.Vue ? (function () {
     LS, MF, plural, initials, asset, thumbImg, ROLE_LABELS, MODE_LABELS,
     store, toggleTheme, setTheme, setLayout, LAYOUTS, autoStatus, DeviceSettings,
     ApiError, rawApi, callApi, resumeByDevice,
-    OFFLINE, IDB, cachePut, outbox, myOps, queueOp, cancelOp, kickOps, opHandlers, forgetDevice,
+    OFFLINE, QUEUE, IDB, cachePut, outbox, myOps, queueOp, cancelOp, kickOps, flushOps, opHandlers, forgetDevice,
     SCREENS, POINT_SCREENS, HELP_SCREENS, screen, navFor, allScreens,
     loadApp, toLogin, boot, confetti, enterPoint, leavePoint, addDays, atText, photoOf, setPhoto,
   };
@@ -4027,14 +4156,14 @@ window.MFC = window.Vue ? (function () {
   if (!C) return;
 
   const { reactive, ref, computed, watch, nextTick, onMounted, onBeforeUnmount } = Vue;
-  const { store, LS, MF, plural, initials, asset, thumbImg, callApi, autoStatus, confetti, photoOf, OFFLINE } = C;
+  const { store, LS, MF, plural, initials, asset, thumbImg, callApi, autoStatus, confetti, photoOf, QUEUE } = C;
   const fmt = MF.fmt;
 
   // ================================================================== данные точки
 
   const work = reactive({
     tt: '', data: null, error: '', at: 0,
-    base: null,    // без интернета (OFFLINE): ответ сервера; data = base + очередь действий поверх (recompute)
+    base: null,    // очередь правок (QUEUE): ответ сервера; data = base + очередь действий поверх (recompute)
     busy: 0,       // идут запросы — опрос сервера не перетирает данные
     pending: 0,    // сохранения в фоне
     sync: 'idle',  // полоска вверху экрана: idle | saving | done | error
@@ -4063,7 +4192,7 @@ window.MFC = window.Vue ? (function () {
       const data = await callApi('work.load', { tt });
       // Пока шёл запрос, на экране что-то отметили — ответ уже устарел
       if (work.tt !== tt || work.seq !== seq || work.pending) return;
-      if (OFFLINE) { work.base = data; recompute(); } else work.data = data;
+      if (QUEUE) { work.base = data; recompute(); } else work.data = data;
       work.error = '';
       work.at = Date.now();
     } catch (e) {
@@ -4128,7 +4257,7 @@ window.MFC = window.Vue ? (function () {
   // Мгновенное сохранение: результат сразу на экране, сервер пишет в фоне (полоска вверху).
   // entries: [{ item, fact, comment }]. Ошибка — позиция возвращается, введённое остаётся черновиком.
   function commitSave(entries, toastText) {
-    if (OFFLINE) return commitSaveQ(entries, toastText);
+    if (QUEUE) return commitSaveQ(entries, toastText);
     const kind = entries[0].item.kind;
     const employee = shiftEmployee(kind);
     const stamp = nowStamp();
@@ -4220,7 +4349,7 @@ window.MFC = window.Vue ? (function () {
   }
 
   function addItem(kind, name, fact, comment, target) {
-    if (OFFLINE) return addItemQ(kind, name, fact, comment, target);
+    if (QUEUE) return addItemQ(kind, name, fact, comment, target);
     return busy(async () => {
       const r = await callApi('work.add', { kind, tt: work.tt, name, fact, comment, date: kind === 'preps' ? prepDay.value : undefined });
       upsert(r.item);
@@ -4236,7 +4365,7 @@ window.MFC = window.Vue ? (function () {
     toast.visible = false;
     toast.undo = null;
     // Без интернета: ещё не ушло на сервер — снять из очереди; ушло — вернуть позиции в работу (тоже очередью)
-    if (OFFLINE && u.opId) {
+    if (QUEUE && u.opId) {
       if (!C.cancelOp(u.opId)) {
         for (const id of u.uids) { const cur = listOf(u.kind).find(x => x.uid === id); if (cur && cur.status !== 'todo') unmarkItemQ(cur, true); }
       }
@@ -4265,7 +4394,7 @@ window.MFC = window.Vue ? (function () {
   // Сразу на экране, сервер — в фоне: нетронутый остаток пропадает, у заготовки смузи снимается «Набор собран».
   // Ошибка — отметка возвращается на место, причина — в уведомлении.
   async function unmarkItem(item) {
-    if (OFFLINE) return unmarkItemQ(item);
+    if (QUEUE) return unmarkItemQ(item);
     const kind = item.kind;
     const uid = item.uid;
     const tt = work.tt;
@@ -4319,7 +4448,7 @@ window.MFC = window.Vue ? (function () {
 
   // Смена — тоже сразу на экране; сервер подтверждает в фоне
   async function setShift(role, name) {
-    if (OFFLINE) return setShiftQ(role, name);
+    if (QUEUE) return setShiftQ(role, name);
     const before = Object.assign({}, work.data.shift);
     const next = Object.assign({}, before, { [role]: name });
     if (role === 'bar' && name && !before.prep) next.prep = name;
@@ -4333,7 +4462,7 @@ window.MFC = window.Vue ? (function () {
     }
   }
 
-  // ================================================================== без интернета (OFFLINE, 2026-10-26)
+  // ================================================================== очередь правок (2026-10-26; с 2026-11-16 — всегда, не только без интернета)
   // Данные точки = ответ сервера (work.base) + поверх ещё не принятые действия очереди (applyOp): экран показывает
   // своё и без интернета, и после перезапуска приложения. Ответ сервера на действие правит work.base (opHandlers) и
   // копию на устройстве; сервер отказал — действие уходит из «поверх», позиция — как на сервере, введённое — в черновик.
@@ -4468,7 +4597,7 @@ window.MFC = window.Vue ? (function () {
   }
   const baseListOf = (b, kind) => kind === 'preps' ? b.preps : b.dishes;
 
-  if (OFFLINE) {
+  if (QUEUE) {
     watch(() => C.outbox.ops.map(o => o.id + o.state).join('|'), recompute);
     watch(() => C.outbox.busy, b => { work.sync = b ? 'saving' : 'idle'; });
     Object.assign(C.opHandlers, {
@@ -4872,7 +5001,7 @@ window.MFC = window.Vue ? (function () {
       const unmark = it => { unmarkItem(it); };
 
       async function collect(s) {
-        if (OFFLINE) {
+        if (QUEUE) {
           C.queueOp('work.smoothieDone', { tt: work.tt, date: s.date, dish: s.dish, at: Date.now() }, { tt: work.tt, label: 'Набор собран · ' + s.dish });
           showToast('Набор собран · ' + s.dish);
           const next = list.value.find(x => !x.collected && x.key !== s.key);
@@ -7149,6 +7278,14 @@ window.MFC = window.Vue ? (function () {
     }
     return saladPart;
   }
+
+  // Изменения салат-базы, не ушедшие на сервер (раздел закрыли раньше), уходят и без открытия раздела (2026-11-16)
+  watch(() => store.phase === 'app' && !!store.salad && store.user ? store.user.login : '', login => {
+    if (!login) return;
+    let n = 0;
+    try { const a = JSON.parse(C.LS.get('mf-salad-outbox:' + login) || '[]'); n = Array.isArray(a) ? a.length : 0; } catch (e) { n = 0; }
+    if (n) loadSalad().then(() => C.salad.boxOpen(login)).catch(() => {});
+  }, { immediate: true });
 
   // ---------------------------------------------------------------- «Исправили ошибку» в салат-базе (26–28.10)
   // Признак — store.salad.notice (сервер: waSaladAccess_, всем с разделом). Ждёт, пока закроют обучение и новости;
@@ -9753,6 +9890,57 @@ window.MFC = window.Vue ? (function () {
 
   const ap = reactive({ week: '', byWeek: {} });
 
+  // ---------- Правки цифр — очередью (2026-11-16). Цифра — сразу на экране и в очередь устройства (ui_core: outbox),
+  // на сервер — по порядку и пачками (admin.autoplan.setCellMany). Раньше каждая цифра шла своим запросом одновременно
+  // с остальными, и при быстром вводе часть падала «Сервер занят». Ответы и отказы — здесь, на уровне файла: правка
+  // может дойти, когда экран уже закрыт.
+  const CELL = 'admin.autoplan.setCell';
+  const cellKey = (tt, date, name) => tt + '|' + date + '|' + norm(name);
+  const note = ref(null);   // предупреждение или отказ ответа очереди — экран показывает его в sendInfo
+
+  // Ячейка на данных недели (запись «что в листе»), при нужде — новая строка
+  function cellEntry(d, tt, name, group, unit) {
+    const all = d.actual || (d.actual = {});
+    const byTt = all[tt] || (all[tt] = {});
+    return byTt[norm(name)] || (byTt[norm(name)] = { name, group, unit, cells: d.days.map(() => null), done: d.days.map(() => false) });
+  }
+
+  // Ждущие и отправляемые правки — поверх данных недели: загрузка с сервера (или ответ «Отправить план») не стирает
+  // ещё не дошедшие цифры
+  function overlayCells(d) {
+    if (!d || !d.days) return;
+    for (const o of C.myOps()) {
+      if (o.method !== CELL || o.state === 'fail') continue;
+      const i = d.days.indexOf(o.params.date);
+      if (i < 0) continue;
+      const m = o.meta || {};
+      cellEntry(d, o.params.tt, o.params.name, m.group, m.unit).cells[i] = o.params.amount;
+    }
+  }
+
+  C.opHandlers[CELL] = (op, res) => {
+    const m = op.meta || {};
+    if (res && res.warning && m.week === ap.week) {
+      note.value = { warning: true, text: op.params.name + ', ' + MF.day(op.params.date) + ': ' + res.warning, recalcDate: res.recalc ? op.params.date : '' };
+    }
+    return {};
+  };
+  // Отказ: цифра — как в листе (если новой правки той же ячейки нет), отмеченная на точке — помечается
+  C.opHandlers['fail:' + CELL] = op => {
+    const m = op.meta || {};
+    const d = ap.byWeek[m.week];
+    const newer = C.myOps().some(o => o !== op && o.key === op.key && o.state !== 'fail');
+    if (d && d.days && !newer) {
+      const i = d.days.indexOf(op.params.date);
+      if (i >= 0) {
+        const e = cellEntry(d, op.params.tt, op.params.name, m.group, m.unit);
+        e.cells[i] = m.was === undefined ? null : m.was;
+        if (op.code === 'CONFLICT') e.done[i] = true;
+      }
+    }
+    if (m.week === ap.week) note.value = { error: true, text: op.params.name + ': ' + op.error };
+  };
+
   const AutoplanView = {
     template: '#tpl-autoplan',
     directives: { focus: { mounted: el => { el.focus(); if (el.select) el.select(); } } },
@@ -9770,6 +9958,7 @@ window.MFC = window.Vue ? (function () {
       const ask = ref('');
       const sending = ref(false);
       const sendInfo = ref(null);
+      watch(note, v => { if (v) { sendInfo.value = v; note.value = null; } });
       const edit = reactive({ key: '', value: '', row: null, i: 0 });
 
       const data = computed(() => ap.byWeek[ap.week] || null);
@@ -10068,9 +10257,10 @@ window.MFC = window.Vue ? (function () {
         sendInfo.value = null;
         const week = ap.week;
         try {
+          if (!(await cellsSent())) return;
           const r = await callApi('admin.gemma.apply', { weekStart: week });
           const d = ap.byWeek[week];
-          if (d) d.actual = r.actual;
+          if (d) { d.actual = r.actual; overlayCells(d); }
           sendInfo.value = { text: 'ИИ-план внесён в лист: ' + r.changed + ' ' + plural(r.changed, ['позиция', 'позиции', 'позиций']) +
             (r.skipped ? '; отмеченные на точках не изменены: ' + r.skipped : '') };
         } catch (e) {
@@ -10188,9 +10378,10 @@ window.MFC = window.Vue ? (function () {
         sendInfo.value = null;
         const week = ap.week;
         try {
+          if (!(await cellsSent())) return;
           const r = await callApi('admin.autoplan.send', monday ? { weekStart: week, only: 'monday', tts } : { weekStart: week, replace, tts });
           const d = ap.byWeek[week];
-          if (d) { d.actual = r.actual; d.last = r.last; }
+          if (d) { d.actual = r.actual; d.last = r.last; overlayCells(d); }
           sendInfo.value = { text: 'Отправлено: ' + r.text };
         } catch (e) {
           if (e.code !== 'AUTH') sendInfo.value = { error: true, text: e.message };
@@ -10217,21 +10408,24 @@ window.MFC = window.Vue ? (function () {
 
         const d = data.value;
         const tt = point.value.tt;
-        const all = d.actual || (d.actual = {});
-        const byTt = all[tt] || (all[tt] = {});
-        let e = entryOf(r);
-        if (!e) e = byTt[norm(r.name)] = { name: r.name, group: r.group, unit: r.unit, cells: d.days.map(() => null), done: d.days.map(() => false) };
-        const was = e.cells[i];
-        e.cells[i] = amount;   // сразу на экране; при ошибке — откат
+        const e = cellEntry(d, tt, r.name, r.group, r.unit);
+        const key = cellKey(tt, d.days[i], r.name);
+        // Цифра «как в листе» — до первой ещё не дошедшей правки этой ячейки (откат при отказе)
+        const prev = C.myOps().find(o => o.key === key && o.state !== 'fail');
+        const was = prev && prev.meta ? prev.meta.was : e.cells[i];
+        e.cells[i] = amount;   // сразу на экране; на сервер — очередью
         sendInfo.value = null;
-        try {
-          const res = await callApi('admin.autoplan.setCell', { tt, date: d.days[i], name: r.name, amount });
-          if (res.warning) sendInfo.value = { warning: true, text: r.name + ', ' + MF.day(d.days[i]) + ': ' + res.warning, recalcDate: res.recalc ? d.days[i] : '' };
-        } catch (err) {
-          e.cells[i] = was;
-          if (err.code === 'CONFLICT') e.done[i] = true;
-          if (err.code !== 'AUTH') sendInfo.value = { error: true, text: r.name + ': ' + err.message };
-        }
+        C.queueOp(CELL, { tt, date: d.days[i], name: r.name, amount }, {
+          key, tt, label: 'План · ' + r.name + ' · ' + WD[i] + ' ' + dm(d.days[i]) + ' → ' + fmt(amount),
+          meta: { week: ap.week, was, group: r.group, unit: r.unit },
+        });
+      }
+
+      // Перед действиями, которые меняют план целиком, — дождаться, пока уйдут правки цифр (иначе порядок перепутается)
+      async function cellsSent() {
+        if (await C.flushOps(30000, o => o.method === CELL)) return true;
+        sendInfo.value = { error: true, text: 'Правки цифр ещё отправляются — подождите немного и повторите' };
+        return false;
       }
 
       // ---------- Добавить блюдо: справочник блюд — один раз за открытие экрана
@@ -10334,9 +10528,10 @@ window.MFC = window.Vue ? (function () {
         const d = data.value;
         Object.assign(qa, { busy: true, error: '' });
         try {
+          if (!(await cellsSent())) { qa.error = sendInfo.value.text; return; }
           const res = await callApi('admin.autoplan.setCells', { name: qa.dish.name, amount, dates: qa.days.map(i => d.days[i]),
             tts: d.points.map(p => p.tt), weekStart: ap.week });
-          if (res.actual) d.actual = res.actual;
+          if (res.actual) { d.actual = res.actual; overlayCells(d); }
           qa.open = false;
           const ptName = t => (d.points.find(p => p.tt === t) || { name: t }).name;
           const np = [...new Set(res.noPlan.map(x => x.tt))].map(ptName);
@@ -10373,6 +10568,7 @@ window.MFC = window.Vue ? (function () {
         error.value = '';
         try {
           const d = await callApi('admin.autoplan.preview', { weekStart: week });
+          overlayCells(d);
           ap.byWeek[week] = d;
           if (my !== seq) return;
           status.value = d.status;
@@ -10451,8 +10647,9 @@ window.MFC = window.Vue ? (function () {
         sending.value = true;
         sendInfo.value = null;
         try {
+          if (!(await cellsSent())) return;
           const res = await callApi('admin.autoplan.remove', { name: r.name, id: r.id || '', tts, weekStart: ap.week });
-          if (res.actual) d.actual = res.actual;
+          if (res.actual) { d.actual = res.actual; overlayCells(d); }
           // Из расчёта на экране — сразу (пересчёт его уже не поставит)
           const hit = tt => !tts || tts.includes(tt);
           d.points.forEach(p => { if (hit(p.tt)) p.rows = p.rows.filter(x => norm(x.name) !== norm(r.name)); });
@@ -10745,9 +10942,9 @@ window.MFC = window.Vue ? (function () {
         id: 'p-offline', title: 'Пропал интернет',
         steps: [
           'В приложении, установленном на телефон (иконка «БАР» на экране): работайте как обычно — отмечайте «Готово», «Частично», «Вне плана», возвращайте в работу, выбирайте смену. Всё сохраняется на телефоне сразу.',
-          'Вверху — полоса «Нет интернета · не отправлено: N». Нажмите её — откроется журнал: что сделано и ждёт отправки. Приложение можно закрыть и открыть снова — оно откроется и без интернета, с последними данными.',
+          'Вверху — полоса «Нет интернета», справа внизу — значок «Нет связи» с числом: сколько действий ещё не выгружено. Нажмите значок или полосу — откроется журнал: что сделано и ждёт отправки. Приложение можно закрыть и открыть снова — оно откроется и без интернета, с последними данными.',
           'Появится связь — всё уйдёт само, по порядку, с тем временем, когда отмечали. «Не принято» — сервер отказал (например, позицию уже отметили с другого устройства): причина — в журнале, «Убрать» — убрать запись.',
-          'По обычной ссылке в браузере без интернета сохранить нельзя: приложение напишет «Не сохранено», введённое останется в карточке — нажмите «Сохранить» ещё раз, когда связь появится.',
+          'По обычной ссылке в браузере — так же: отметки копятся на устройстве (значок «Нет связи» с числом) и уходят, когда связь появится. Но открыть ссылку без интернета нельзя — не закрывайте вкладку, пока значок не пропадёт.',
           'Значок стрелок в шапке — подтянуть свежий план и отметки.',
         ],
       },
@@ -10903,7 +11100,7 @@ window.MFC = window.Vue ? (function () {
         steps: [
           'Утром в строке ингредиента — «Утро»: сколько взяли в работу (в единицах барного товара, обычно кг) — взвесьте всё вместе со вчерашним остатком, если его оставляли на завтра. Взяли товар с витрины — поставьте галочку «с витрины». Если на витрине товар штучный, а в баре весовой (салат романо), галочки нет: вес — в «Утро», а сколько штук взяли — в поле «с витрины … шт» под ним (например, 2 шт и 1 кг — в акт уйдёт «2 шт романо → 1 кг романо для бара»). Брали из бара — штуки не вносите. Если руководитель задал вес 1 шт («1 шт ≈ 0,3 кг»), достаточно внести штуки — вес посчитается сам (он показан курсивом; взвесили — впишите точный). Без веса строка помечена «Внесите вес»: штуки без веса не попадут ни в расход, ни в акт. Ингредиенты, которые руководитель включил не на все дни недели, в остальные дни не показываются (если по ним ничего не внесено).',
           'Днём дорезали — «+» в столбце «Днём»: количество и «Взято с витрины». У штучной витрины (романо) первое поле — сколько штук взяли; задан вес 1 шт — вес можно не вносить, приложение покажет «Вес по штукам: 2 × 0,3 = 0,6 кг». Каждое пополнение — отдельной записью, ошибочную уберите крестиком.',
-          'Цифры сохраняются сами — при переходе к следующему полю (Enter) и через пару секунд после ввода. Статус — вверху («Сохраняем…», «Сохранено»). Пропала связь или сервер занят — внизу появится «Не сохранено … Повторяем сами»: ничего не делайте, внесённое остаётся на экране и в телефоне и уйдёт само (даже если закрыть и снова открыть страницу в тот же день). Цифры, которые внёс другой сотрудник, появляются после вашего сохранения и раз в минуту.',
+          'Цифры сохраняются сами — при переходе к следующему полю (Enter) и через пару секунд после ввода. Статус — вверху («Сохраняем…», «Сохранено»). Пропала связь или сервер долго занят — внизу появится «Не выгружено … Повторяем сами»: ничего не делайте, внесённое остаётся на экране и в телефоне и уйдёт само (даже если закрыть и снова открыть страницу в тот же день). Цифры, которые внёс другой сотрудник, появляются после вашего сохранения и раз в минуту.',
           '5 кг и больше в одной цифре (кг, л) — поле красное и внизу вопрос «Нет ли пропущенной запятой?»: «Исправить» — к полю, «Верно» — если цифра правильная. Такие цифры ещё раз покажутся в окне документов — без галочки «Проверил — цифры верные» документы не создаются. Остатка нет — внесите 0.',
           'Удобнее на бумаге — «Бланк для печати» вверху экрана: лист А4 с ингредиентами дня (утро, пополнения днём, остаток, галочки «в» — с витрины и «з» — на завтра, у штучной витрины — «с витр. ___ шт») и строкой «Не продано готовых салатов». Сотрудник заполняет его за день, потом цифры вносят в приложение.',
           'Вечером, когда продажи остановлены, взвесьте остатки и внесите «Остаток вечером». Остаток, который остаётся на завтра, отметьте «оставить на завтра» — он не спишется и останется на складе; на следующий день он нигде не показывается: утром взвесьте его вместе со всем. Где руководитель перенос выключил, галочки нет — остаток всегда списывается. Enter или ↓ — к тому же полю следующего ингредиента; «Нужно внести» — только строки без остатка.',
@@ -10949,8 +11146,9 @@ window.MFC = window.Vue ? (function () {
     { g: 'marks', q: 'Что такое «Остаток»?', a: 'Строка на недоделанную часть позиции, отмеченной как «Частично готово». Её отмечают так же, как обычную позицию.', tags: 'остаток частично' },
     { g: 'marks', q: 'Что значит «В работе»?', a: 'Вы начали вводить количество, но ещё не нажали «Сохранить». Откройте позицию и сохраните.', tags: 'статус в работе черновик' },
     { g: 'marks', q: 'Как отметить то, чего не было в плане?', a: 'Внизу списка — «Внеплановая позиция»: выберите блюдо или заготовку из справочника, введите количество, «Сохранить».', tags: 'вне плана добавить лишнее дополнительно' },
-    { g: 'marks', q: 'Как понять, что отметка сохранилась?', a: 'Внизу появится «Сохранено», позиция перейдёт в «Готово». Если связи нет — будет «Не сохранено»: нажмите «Сохранить» ещё раз.', tags: 'сохранилось проверить' },
-    { g: 'marks', q: 'Пропал интернет — отметки потеряются?', a: 'Нет. В приложении, установленном на телефон, отмечайте как обычно: всё сохраняется на телефоне, вверху — «Нет интернета · не отправлено: N» (нажмите — журнал), а когда связь появится, уйдёт само. Приложение открывается и без интернета. По обычной ссылке в браузере введённое останется в карточке — нажмите «Сохранить», когда связь появится.', tags: 'нет связи оффлайн wi-fi вайфай без интернета журнал не отправлено очередь' },
+    { g: 'marks', q: 'Как понять, что отметка сохранилась?', a: 'Позиция сразу перейдёт в «Готово» — отметка сохранена в приложении. Справа внизу значок с числом — сколько отметок ещё не выгружено на сервер; «Всё выгружено» — всё на сервере. Нет связи или сервер занят — ничего делать не нужно: отметки уйдут сами.', tags: 'сохранилось проверить выгружено' },
+    { g: 'marks', q: 'Пропал интернет — отметки потеряются?', a: 'Нет. Отмечайте как обычно: всё сохраняется на устройстве, справа внизу — значок «Нет связи» с числом (нажмите — журнал), а когда связь появится, уйдёт само. Приложение, установленное на телефон, открывается и без интернета. По обычной ссылке в браузере не закрывайте вкладку, пока значок не пропадёт: без интернета ссылка не откроется.', tags: 'нет связи оффлайн wi-fi вайфай без интернета журнал не отправлено очередь' },
+    { g: 'marks', q: 'Справа внизу значок с числом — что это?', a: 'Сколько ваших действий ещё не выгружено на сервер. Всё, что вы вводите, сначала сохраняется в приложении, а на сервер уходит по очереди и пачками — поэтому вводить можно сколько угодно быстро: ничего не оборвётся и не потеряется. «Выгружаем» — уходит сейчас; «Сервер занят — повторим» — сервер обрабатывает запросы других точек, приложение повторит само через несколько секунд, ничего делать не нужно; «Нет связи» — уйдёт, когда связь появится. «Всё выгружено» — всё на сервере, значок пропадёт. Нажмите значок — журнал: что именно ждёт.', tags: 'значок синхронизация выгружено не выгружено выгружаем сервер занят очередь быстрый ввод ошибка выгрузки' },
     { g: 'marks', q: 'Вверху «Не принято» — что это?', a: 'Отметку, сделанную без интернета, сервер не принял — обычно потому, что позицию уже отметили с другого устройства или день уже закрыт. Нажмите полосу: в журнале видна причина. На экране позиция — как на сервере; если нужно, отметьте заново. «Убрать» — убрать запись из журнала.', tags: 'не принято журнал очередь конфликт без интернета' },
     { g: 'marks', q: 'Где посмотреть состав блюда?', a: 'В карточке блюда — тех. карта: на план, а как только введёте количество — на него (сделаю 3 из 5 — состав на 3). Все блюда и заготовки — во вкладке «Справочник».', tags: 'тех карта техкарта рецепт состав' },
     { g: 'preps', q: 'Почему не видно заготовок?', a: 'Заготовки видны в окне заготовок точки — обычно с 17:00 накануне до 15:00 этого дня (у точки может быть своё окно). Если окно открыто, а списка нет — администратор ещё не рассчитал заготовки.', tags: 'заготовки пусто нет окно' },
@@ -10967,7 +11165,7 @@ window.MFC = window.Vue ? (function () {
     { g: 'plan', q: 'Блюдо продаётся, но не попадает в план', a: 'Оно заблокировано в автоплане. В «Автоплане» внизу — «Продавались, но заблокированы»: нажмите «Включить», затем «Пересчитать».', tags: 'нет в плане заблокировано включить' },
     { g: 'plan', q: 'Как убрать блюдо из плана, чтобы автоплан его больше не ставил?', a: '«Автоплан» → точка → корзина у строки блюда → «Только» эта точка или «Во всех точках» → «Убрать». Строки плана с сегодняшнего дня уберутся, блюдо станет «Заблокировано» (в точке или везде). Вернуть — «Добавить блюдо» или «Справочники» → блюдо → «По точкам».', tags: 'удалить убрать блюдо из плана заблокировать корзина' },
     { g: 'plan', q: 'Как добавить в план блюдо, которого там нет?', a: '«Автоплан» → неделя → точка → «Добавить блюдо» → «Только эта точка» или «Во все точки» → найдите блюдо. Строка появится в списке; нажмите на цифру в нужном дне и введите количество — так по каждому дню. При «Во все точки» — одна цифра и дни в окне → «Поставить в план»: блюдо встанет всем точкам сразу. Без цифры блюдо в план точки не попадёт; точкам, которым план недели ещё не отправлен, цифра не встанет. Цифры ставятся сегодня и дальше в днях «в плане»: если план недели ещё не отправлен — сначала «Отправить в план». Строку без цифр можно убрать крестиком.', tags: 'добавить блюдо новое нет в плане строка вручную' },
-    { g: 'plan', q: 'Как поправить цифру отправленного плана?', a: 'В «Автоплане» в дне «в плане» нажмите на цифру и введите новую; 0 — убрать блюдо из дня. Отмеченную на точке позицию изменить нельзя. Если заготовки на этот день уже рассчитаны — после правок «К расчёту» → «Пересчитать».', tags: 'изменить план исправить количество' },
+    { g: 'plan', q: 'Как поправить цифру отправленного плана?', a: 'В «Автоплане» в дне «в плане» нажмите на цифру и введите новую; 0 — убрать блюдо из дня. Править можно быстро, цифру за цифрой: они сразу на экране, а на сервер уходят сами, пачками (значок справа внизу — сколько ещё не выгружено). Отмеченную на точке позицию изменить нельзя. Если заготовки на этот день уже рассчитаны — после правок «К расчёту» → «Пересчитать».', tags: 'изменить план исправить количество' },
     { g: 'plan', q: 'Зачем отправлять понедельник отдельно?', a: 'Заготовки на понедельник делают в воскресенье с 17:00, а неделя продаж закрывается только в 22:00. Поэтому план понедельника уходит раньше (по умолчанию в субботу в 9:00), а остальные дни — в воскресенье вечером.', tags: 'понедельник заранее' },
     { g: 'plan', q: 'Gemma не ответила — что будет?', a: 'План уйдёт «большее из двух» — как без ИИ. Можно нажать «Составить ИИ-план» ещё раз чуть позже.', tags: 'ошибка gemma не отвечает' },
     { g: 'plan', q: 'Как отправить план только одной точке?', a: 'В «Автоплане» нажмите «Отправить в план» (или «Только понедельник», «Заменить расчётом») и в окне выберите нужную точку вместо «Все точки».', tags: 'одна точка отдельно отправить' },
@@ -10985,7 +11183,7 @@ window.MFC = window.Vue ? (function () {
     { g: 'admin', q: 'У блюда нет фото', a: '«Интеграции» → загрузить фото блюд. Фото берётся из iiko; если его нет в iiko — показывается заглушка.', tags: 'картинка фото изображение' },
     { g: 'admin', q: 'Итог конкурса не пришёл в «Пачку»', a: '«Настройки» → «Конкурсы»: под конкурсом написано, почему не ушло. Чаще всего бот не добавлен в чат — добавьте его в чат в «Пачке», приложение отправит само через полчаса.', tags: 'пачка конкурс мессенджер бот чат' },
     { g: 'admin', q: 'Кто изменил план или отметку?', a: '«Журнал» — кто, когда и что сделал, с фильтрами по дате, точке и действию.', tags: 'журнал история кто' },
-    { g: 'admin', q: 'Салат-база: внизу «Не сохранено … Повторяем сами»', a: 'Пропала связь или сервер был занят. Ничего делать не нужно: цифры остаются на экране и в телефоне и уйдут сами, как только сервер ответит (можно нажать «Повторить сейчас»). Строки, которые ещё не сохранились, помечены «Не сохранено». Страницу можно закрыть и открыть снова — несохранённое отправится само (за прошлый день — если его документы ещё не созданы).', tags: 'салат база не сохранилось сервер занят нет связи пропало' },
+    { g: 'admin', q: 'Салат-база: внизу «Не выгружено … Повторяем сами»', a: 'Пропала связь или сервер долго занят. Ничего делать не нужно: цифры сохранены на экране и в телефоне и уйдут сами, как только сервер ответит (можно нажать «Повторить сейчас»). Строки, которые ещё не дошли до сервера, помечены «Не выгружено». Короткое «сервер занят» приложение пережидает само — на экране только «Сохраняем…». Страницу можно закрыть и открыть снова — несохранённое отправится само (за прошлый день — если его документы ещё не созданы).', tags: 'салат база не сохранилось сервер занят нет связи пропало' },
     { g: 'admin', q: 'Салат-база: куда делась строка «со вчера»?', a: 'С 25.10 её нет. Остаток «оставить на завтра» раньше на следующий день сам прибавлялся к расчёту, хотя утром его и так взвешивают вместе со всем, — он считался дважды. Теперь утром взвесьте всё, что берёте в работу, вместе со вчерашним остатком и внесите в «Утро»; вычитать ничего не нужно. Акты, в которые остаток попал дважды, руководитель исправляет в «Настройках» раздела → «Акты в салат-базу с остатком «со вчера»» → «Исправить».', tags: 'салат база со вчера остаток оставить на завтра дважды ошибка исправить акт' },
     { g: 'admin', q: 'Салат-база: вчера забыли создать документы', a: 'Откройте этот день стрелкой «‹» у даты или в «Архиве». Если документов за день нет, вверху будет «Документы за этот день не созданы» → «Создать задним числом»: поля откроются, внесите или поправьте цифры и нажмите «Создать документы» внизу. В iiko документы будут от того дня, 23:50. Если за день уже есть хоть один документ, задним числом не создать.', tags: 'салат база задним числом вчера забыли прошлый день документы не создали' },
     { g: 'admin', q: 'Салат-база: вместо 0,23 записалось 23', a: 'До 22.10 так бывало, если во время набора приходил ответ сервера по другой строке: поле очищалось после «0,». Теперь набранное не стирается, а цифры от 5 кг подсвечиваются красным с вопросом «Нет ли пропущенной запятой?» и ещё раз — в окне документов (без галочки «Проверил» документы не создаются). Если документы с ошибкой уже созданы — исправьте их в iikoOffice.', tags: 'салат база запятая 23 кг ошибка вес неправильно' },
@@ -12109,8 +12307,9 @@ html.mf-tr-open, html.mf-tr-open body { overflow: hidden; }
     </aside>
 
     <div class="app__content">
-      <!-- Без интернета (PWA): полоса-журнал — сколько действий ждут отправки или не приняты; нажатие — список -->
-      <button v-if="OFFLINE && journal.show" type="button" class="net-status wa-journal-bar" :class="'is-' + journal.tone" @click="outbox.open = true">
+      <!-- Полоса-журнал — только когда нужно внимание: сервер не принял действие или нет интернета (PWA); нажатие — список.
+           Обычная выгрузка — значком внизу (wa-sync): он не сдвигает экран при быстром вводе -->
+      <button v-if="QUEUE && journal.show" type="button" class="net-status wa-journal-bar" :class="'is-' + journal.tone" @click="outbox.open = true">
         <svg class="icon icon--sm"><use :href="journal.icon"></use></svg><span>{{ journal.text }}</span>
         <svg class="icon icon--sm wa-journal-bar__go"><use href="#i-chevron-right"></use></svg>
       </button>
@@ -12183,6 +12382,14 @@ html.mf-tr-open, html.mf-tr-open body { overflow: hidden; }
       </main>
     </div>
 
+    <!-- Значок синхронизации (2026-11-16): сколько действий ещё не на сервере — поверх экрана, ничего не сдвигает;
+         всё ушло — «Всё выгружено» на 2,5 с; нажатие — журнал -->
+    <button v-if="sync.show" type="button" class="wa-sync" :class="'is-' + sync.tone" @click="outbox.open = true" :aria-label="sync.aria">
+      <span v-if="sync.spin" class="spinner wa-sync__spin"></span>
+      <svg v-else class="icon icon--sm"><use :href="sync.icon"></use></svg>
+      <span class="wa-sync__text">{{ sync.text }}</span><b v-if="sync.n" class="wa-sync__n">{{ sync.n }}</b>
+    </button>
+
     <nav class="bottom-nav" :style="{ gridTemplateColumns: 'repeat(' + bottomItems.length + ', 1fr)' }">
       <a v-for="item in bottomItems" :key="item.id" href="#" class="bottom-nav__item"
          :class="{ 'bottom-nav__item--active': activeBottom === item.id }" @click.prevent="go(item.id)">
@@ -12233,7 +12440,7 @@ html.mf-tr-open, html.mf-tr-open body { overflow: hidden; }
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="logout-title">
         <h2 class="modal__title" id="logout-title">Выйти из приложения?</h2>
         <p v-if="hasDevice" class="modal__text">Это устройство перестанет входить автоматически — для входа понадобится пароль.</p>
-        <p v-if="OFFLINE && journalWaiting" class="modal__text"><b>Не отправлено действий: {{ journalWaiting }}.</b> Они останутся на этом устройстве и уйдут, когда вы снова войдёте.</p>
+        <p v-if="QUEUE && journalWaiting" class="modal__text"><b>Не отправлено действий: {{ journalWaiting }}.</b> Они останутся на этом устройстве и уйдут, когда вы снова войдёте.</p>
         <div class="modal__actions">
           <button type="button" class="btn btn--ghost" @click="confirmLogout = false">Отмена</button>
           <button type="button" class="btn btn--danger" @click="logout">Выйти</button>
@@ -12241,11 +12448,11 @@ html.mf-tr-open, html.mf-tr-open body { overflow: hidden; }
       </div>
     </div>
 
-    <!-- Журнал: действия в очереди на отправку и не принятые сервером (OFFLINE, ui_core: outbox) -->
-    <div v-if="OFFLINE" class="modal-backdrop" :class="{ 'is-open': outbox.open }" @click.self="outbox.open = false">
+    <!-- Журнал: действия в очереди на отправку и не принятые сервером (ui_core: outbox) -->
+    <div v-if="QUEUE" class="modal-backdrop" :class="{ 'is-open': outbox.open }" @click.self="outbox.open = false">
       <div class="modal wa-journal" role="dialog" aria-modal="true" aria-labelledby="journal-title">
-        <h2 class="modal__title" id="journal-title">{{ journalFailed ? 'Не принято и не отправлено' : 'Не отправлено' }}</h2>
-        <p class="modal__text">{{ store.offline ? 'Нет интернета. Действия сохранены на этом устройстве и уйдут сами, как только появится связь — приложение можно закрывать.' : 'Действия уходят на сервер по очереди, в том порядке, в каком их сделали.' }}</p>
+        <h2 class="modal__title" id="journal-title">{{ journalFailed ? 'Не принято и не выгружено' : 'Не выгружено' }}</h2>
+        <p class="modal__text">{{ journalNote }}</p>
         <div class="wa-journal__list">
           <div v-for="o in journalOps" :key="o.id" class="wa-journal__row" :class="'is-' + o.state">
             <span class="wa-journal__time">{{ timeOf(o.at) }}</span>
@@ -12254,7 +12461,7 @@ html.mf-tr-open, html.mf-tr-open body { overflow: hidden; }
           </div>
           <div v-if="saladWaiting" class="wa-journal__row">
             <span class="wa-journal__time">—</span>
-            <span class="wa-journal__main"><b>Салат-база: {{ saladWaiting }} {{ plural(saladWaiting, ['изменение', 'изменения', 'изменений']) }}</b><small>уйдут сами, когда раздел «Салат-база» открыт и есть связь</small></span>
+            <span class="wa-journal__main"><b>Салат-база: {{ saladWaiting }} {{ plural(saladWaiting, ['изменение', 'изменения', 'изменений']) }}</b><small>{{ saladRetry === 'BUSY' ? 'сервер занят — повторим сами' : saladRetry === 'NETWORK' ? 'нет связи — уйдут, как только появится' : 'уходят по очереди' }}</small></span>
           </div>
           <p v-if="!journalOps.length && !saladWaiting" class="modal__text">Всё отправлено.</p>
         </div>
@@ -12560,30 +12767,60 @@ html.mf-tr-open, html.mf-tr-open body { overflow: hidden; }
         toLogin();
       }
 
-      // ---------------------------------------------------------------- журнал очереди (OFFLINE, 2026-10-26)
+      // ---------------------------------------------------------------- журнал очереди (2026-10-26; значок — 2026-11-16)
       const OFFLINE = C.OFFLINE;
+      const QUEUE = C.QUEUE;
       const outbox = C.outbox;
       const journalOps = computed(() => C.myOps().slice().sort((a, b) => a.at - b.at));
       const journalFailed = computed(() => journalOps.value.filter(o => o.state === 'fail').length);
-      // Очередь салат-базы — своя (ui_salad.html, на устройстве): здесь только её размер
-      const saladWaiting = ref(0);
-      if (OFFLINE) {
-        const readSalad = () => {
-          let n = 0;
-          try { const a = JSON.parse(LS.get('mf-salad-outbox:' + (store.user ? store.user.login : '')) || '[]'); n = Array.isArray(a) ? a.length : 0; } catch (e) { n = 0; }
-          saladWaiting.value = n;
-        };
-        readSalad();
-        setInterval(readSalad, 3000);
-      }
+      // Очередь салат-базы — своя (ui_salad.html): раздел загружен — его очередь (C.salad.box), иначе — что на устройстве
+      const saladTick = ref(0);
+      setInterval(() => { saladTick.value++; }, 3000);
+      const saladBox = () => (C.salad && C.salad.box) || null;
+      const saladWaiting = computed(() => {
+        saladTick.value;
+        const b = saladBox();
+        if (b) return b.ops.length + b.sending.length;
+        try { const a = JSON.parse(LS.get('mf-salad-outbox:' + (store.user ? store.user.login : '')) || '[]'); return Array.isArray(a) ? a.length : 0; } catch (e) { return 0; }
+      });
+      const saladRetry = computed(() => { saladTick.value; const b = saladBox(); return b && b.wait ? b.code : ''; });
       const journalWaiting = computed(() => journalOps.value.length - journalFailed.value + saladWaiting.value);
+      // Полоса сверху — только когда нужно внимание
       const journal = computed(() => {
         const n = journalWaiting.value;
         const bad = journalFailed.value;
-        if (bad) return { show: true, tone: 'fail', icon: '#i-alert', text: 'Не принято: ' + bad + (n ? ' · не отправлено: ' + n : '') };
-        if (store.offline) return { show: true, tone: 'offline', icon: '#i-wifi-off', text: n ? 'Нет интернета · не отправлено: ' + n : 'Нет интернета · работаем без него' };
-        if (n) return { show: true, tone: 'sync', icon: '#i-refresh', text: (outbox.busy ? 'Отправляем · ' : 'Ждут отправки · ') + n };
+        if (bad) return { show: true, tone: 'fail', icon: '#i-alert', text: 'Сервер не принял: ' + bad + (n ? ' · не выгружено: ' + n : '') };
+        if (OFFLINE && store.offline) return { show: true, tone: 'offline', icon: '#i-wifi-off', text: n ? 'Нет интернета · всё сохранено на устройстве' : 'Нет интернета · работаем без него' };
         return { show: false };
+      });
+      // Значок внизу: сколько не выгружено и почему ждёт; всё ушло — «Всё выгружено» на 2,5 с
+      const justDone = ref(false);
+      let doneTimer = null;
+      watch(journalWaiting, (n, was) => {
+        if (n) { justDone.value = false; clearTimeout(doneTimer); return; }
+        if (was && !journalFailed.value) {
+          justDone.value = true;
+          clearTimeout(doneTimer);
+          doneTimer = setTimeout(() => { justDone.value = false; }, 2500);
+        }
+      });
+      const sync = computed(() => {
+        const n = journalWaiting.value;
+        if (n) {
+          const why = outbox.retry || saladRetry.value;
+          const aria = 'Не выгружено действий: ' + n + '. Открыть журнал';
+          if ((OFFLINE && store.offline) || why === 'NETWORK') return { show: true, tone: 'wait', icon: '#i-wifi-off', text: 'Нет связи', n, aria };
+          if (why === 'BUSY') return { show: true, tone: 'wait', icon: '#i-clock', text: 'Сервер занят — повторим', n, aria };
+          if (why === 'AUTH') return { show: true, tone: 'wait', icon: '#i-lock', text: 'Нужен вход', n, aria };
+          return { show: true, tone: 'sync', spin: true, text: 'Выгружаем', n, aria };
+        }
+        if (justDone.value) return { show: true, tone: 'ok', icon: '#i-check', text: 'Всё выгружено', n: 0, aria: 'Всё выгружено на сервер' };
+        return { show: false };
+      });
+      const journalNote = computed(() => {
+        if (OFFLINE && store.offline) return 'Нет интернета. Действия сохранены на этом устройстве и уйдут сами, как только появится связь — приложение можно закрывать.';
+        if (outbox.retry === 'BUSY' || saladRetry.value === 'BUSY') return 'Сервер сейчас занят другими запросами — действия сохранены на этом устройстве, повторим сами через несколько секунд.';
+        return 'Действия сохранены на этом устройстве и уходят на сервер по очереди, в том порядке, в каком их сделали. Приложение можно закрывать — после открытия они уйдут сами.';
       });
       const timeOf = ms => {
         const d = new Date(ms);
@@ -12595,15 +12832,16 @@ html.mf-tr-open, html.mf-tr-open body { overflow: hidden; }
       const stateText = o => o.state === 'send' ? 'отправляется…' : o.state === 'fail' ? 'не принято: ' + o.error
         : o.error ? 'ждёт, повторим: ' + o.error : 'ждёт отправки';
       const cancelOp = id => C.cancelOp(id);
-      const sendNow = () => { outbox.tries = 0; C.kickOps(0); };
-      if (OFFLINE) watch(() => journal.value.show && journal.value.text, () => nextTick(stickyOffsets), { immediate: true });
+      const sendNow = () => { outbox.tries = 0; C.kickOps(0); if (C.salad && C.salad.retryNow) C.salad.retryNow(); };
+      watch(() => journal.value.show && journal.value.text, () => nextTick(stickyOffsets), { immediate: true });
 
       return {
         store, nav, isPoint, isPointUser, adminInPoint, point, todayLabel, currentScreen, roleLabel, themeIcon, initials,
         bottomItems, activeBottom, shift, shiftChips, shiftLine, shortName, confirmLogout, syncing, hasDevice, headerEl,
         go, refresh, logout, toggleTheme, leavePoint,
         helpMenu, supportOpen, copied, phoneEl, copyPhone, SUPPORT,
-        OFFLINE, outbox, journal, journalOps, journalFailed, journalWaiting, saladWaiting, timeOf, pointName, stateText, cancelOp, sendNow, plural,
+        OFFLINE, QUEUE, outbox, journal, journalOps, journalFailed, journalWaiting, journalNote, saladWaiting, saladRetry, sync,
+        timeOf, pointName, stateText, cancelOp, sendNow, plural,
       };
     },
   };
